@@ -122,6 +122,7 @@ try:
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
+        GrammarConfig,
         HWKernelConfig,
         KVCacheConfig,
         KVCacheSpecDesc,
@@ -134,6 +135,7 @@ try:
         PDSepConfig,
         ParallelismConfig,
         ProfilingDebugLoggingConfig,
+        ReasoningConfig,
         RopeCache,
         RopeConfig,
         RopeStyle,
@@ -212,6 +214,7 @@ try:
 
     libth_transformer_imported = True
 except BaseException as e:
+    libth_transformer_imported = False
     EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
     logging.info(
