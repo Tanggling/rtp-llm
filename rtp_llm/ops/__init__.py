@@ -135,7 +135,6 @@ try:
         PDSepConfig,
         ParallelismConfig,
         ProfilingDebugLoggingConfig,
-        ReasoningConfig,
         RopeCache,
         RopeConfig,
         RopeStyle,

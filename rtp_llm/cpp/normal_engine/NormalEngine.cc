@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorModules.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -128,17 +127,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     // 此时checkpoint已加载完成，可以将glibc缓存的内存归还给操作系统
     releaseHostMemoryCache();
 
-    // Composition root: wire the structured-output logits-processor module once,
-    // through a single neutral entry. The engine stays backend-agnostic — it does
-    // not name GrammarCompiler / GrammarLogitsProcessor; the module installs its
-    // compile service and registers a pending-processor factory with
-    // LogitsProcessorFactory, so every structured-output stream gets a logits
-    // processor it resolves via prepare() while WAITING (mirrors KV-cache async
-    // load) rather than any scheduler gate. Every other downstream component
-    // (FIFOScheduler, GenerateStream, NormalExecutor, the MTP spec layer) reaches
-    // structured output only through the generic LogitsProcessorFactory /
-    // stream_logits_processor seams.
-    registerStructuredOutputLogitsProcessor(params.grammar_config);
     initScheduler();
     step_profiler_.configureFromConfig(profiling_debug_logging_config);
     (void)startLoop();
@@ -173,10 +161,8 @@ void NormalEngine::initScheduler() {
                             runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.c_str());
     }
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(runtime_config,
-                                                  resource_context_.cache_manager,
-                                                  metrics_reporter_,
-                                                  parallelism_config.dp_rank));
+        scheduler_.reset(new BatchDecodeScheduler(
+            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
                && pd_sep_config.role_type == RoleType::PDFUSION) {

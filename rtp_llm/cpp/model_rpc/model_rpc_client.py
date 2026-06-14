@@ -18,11 +18,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 
-
-# Mirror of cpp/model_rpc/RpcErrorCode.h::transRPCErrorCode for the Python
-# client side: map RPC enum (renumbered, dense) -> ExceptionType (raw HTTP /
-# legacy code). Kept in lock-step with the proto so batch_enqueue can surface
-# real per-item ErrorCode instead of collapsing to UNKNOWN_ERROR.
+# Mirror of cpp/model_rpc/RpcErrorCode.h::transRPCErrorCode — kept in lock-step with the proto.
 _RPC_TO_EXCEPTION_TYPE: dict[int, "ExceptionType"] = {
     ErrorCodePB.NONE_ERROR: ExceptionType.UNKNOWN_ERROR,  # treated as "no info"
     ErrorCodePB.UNKNOWN_ERROR: ExceptionType.UNKNOWN_ERROR,
@@ -170,10 +166,7 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb.structural_tag.value = _pb_string_value_for_json_field(
             input_py.generate_config.structural_tag
         )
-    # Pass response_format through to the C++ side instead of normalizing it
-    # here. QueryConverter::normalizeResponseFormat is the single source of
-    # truth for envelope validation (malformed JSON / unknown type / missing
-    # payload all become INVALID_PARAMS there).
+    # Envelope validation lives in C++ QueryConverter::normalizeResponseFormat — pass through raw.
     if input_py.generate_config.response_format is not None:
         rf = input_py.generate_config.response_format
         skip_empty = (isinstance(rf, str) and not rf.strip()) or (
@@ -663,11 +656,7 @@ class ModelRpcClient(object):
                     result_pb.HasField("error_info")
                     and result_pb.error_info.error_message
                 ):
-                    # Map per-item ErrorCodePB -> ExceptionType so callers can
-                    # distinguish INVALID_PARAMS / GENERATE_TIMEOUT / OOM / etc.
-                    # instead of every batch failure being UNKNOWN_ERROR. The
-                    # PB enum is renumbered (dense small ints), not the raw
-                    # ErrorCode value, so a static dict is required.
+                    # PB enum renumbered (dense) — static dict, not raw ErrorCode cast.
                     exc_type = _RPC_TO_EXCEPTION_TYPE.get(
                         result_pb.error_info.error_code, ExceptionType.UNKNOWN_ERROR
                     )
