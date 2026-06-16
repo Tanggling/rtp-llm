@@ -334,7 +334,6 @@ class ServerArgsGrammarConfigTest(TestCase):
         g = py_env_configs.grammar_config
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
-        self.assertEqual(g.compile_timeout_ms, 60000)
         self.assertEqual(g.num_workers, 32)
         self.assertEqual(g.compiler_cache_bytes, 256 * 1024 * 1024)
 
@@ -344,8 +343,6 @@ class ServerArgsGrammarConfigTest(TestCase):
             "prog",
             "--constrained_json_disable_any_whitespace",
             "1",
-            "--grammar_compile_timeout_ms",
-            "12345",
             "--grammar_num_workers",
             "7",
             "--grammar_compiler_cache_bytes",
@@ -355,7 +352,6 @@ class ServerArgsGrammarConfigTest(TestCase):
         cfgs = self._setup()
         g = cfgs.grammar_config
         self.assertEqual(g.constrained_json_disable_any_whitespace, True)
-        self.assertEqual(g.compile_timeout_ms, 12345)
         self.assertEqual(g.num_workers, 7)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
 
