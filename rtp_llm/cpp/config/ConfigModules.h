@@ -356,9 +356,7 @@ struct FIFOSchedulerConfig {
     std::string to_string() const;
 };
 
-// Token-constraint decoding config. Exposed to Python as "GrammarConfig"
-// for historical reasons; new C++ code should use StructuredOutputConfig.
-struct StructuredOutputConfig {
+struct GrammarConfig {
     std::vector<int32_t> override_stop_tokens;
 
     bool        constrained_json_disable_any_whitespace = false;
@@ -370,8 +368,6 @@ struct StructuredOutputConfig {
     int64_t     compiler_cache_bytes                    = 256LL * 1024 * 1024;
     std::string tokenizer_info_json;
 };
-
-using GrammarConfig = StructuredOutputConfig;
 
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
