@@ -80,8 +80,7 @@ TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     auto            result = backend.getOrCompile({"json", "$$ANY$$"});
     ASSERT_TRUE(result.compiled);
 
-    auto matcher =
-        backend.createMatcher(result.compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
+    auto matcher = backend.createMatcher(result.compiled);
     ASSERT_TRUE(matcher);
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
     EXPECT_FALSE(matcher->isTerminated());
@@ -94,8 +93,7 @@ TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
     auto            result = backend.getOrCompile({"regex", "a"});
     ASSERT_TRUE(result.compiled);
 
-    auto matcher =
-        backend.createMatcher(result.compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
+    auto matcher = backend.createMatcher(result.compiled);
     constexpr int kA = 'a';
     EXPECT_TRUE(matcher->acceptToken(kA));
     EXPECT_EQ(matcher->numAcceptedTokens(), 1);

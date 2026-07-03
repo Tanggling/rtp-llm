@@ -162,13 +162,9 @@ CompileResult XGrammarBackend::getOrCompile(const GrammarKeyCpp& key) {
 }
 
 std::shared_ptr<RtpGrammarMatcher> XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                                  bool                            require_reasoning,
-                                                                  std::optional<std::vector<int>> think_end_token_ids,
                                                                   bool terminate_without_stop_token) {
     RTP_LLM_CHECK_WITH_INFO(compiled != nullptr, "createMatcher requires a non-null CompiledGrammar");
     return std::make_shared<RtpGrammarMatcher>(std::move(compiled),
-                                               require_reasoning,
-                                               std::move(think_end_token_ids),
                                                options_.override_stop_tokens,
                                                terminate_without_stop_token);
 }

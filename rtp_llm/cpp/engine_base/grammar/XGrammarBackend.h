@@ -71,8 +71,6 @@ public:
     CompileResult getOrCompile(const GrammarKeyCpp& key);
 
     std::shared_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                     bool                                       require_reasoning,
-                                                     std::optional<std::vector<int>>            think_end_token_ids,
                                                      bool terminate_without_stop_token = false);
 
     void clear();

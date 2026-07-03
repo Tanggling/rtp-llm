@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -9,16 +10,17 @@
 #include <vector>
 
 #include <ATen/ATen.h>
+#include <c10/core/Event.h>
+
+#include "rtp_llm/cpp/engine_base/grammar/GrammarMatcher.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/GrammarMaskCore.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
-#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 
 namespace rtp_llm {
 
 class GrammarLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
-    explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id = 0);
+    explicit GrammarLogitsProcessor(std::shared_ptr<GrammarMatcher> matcher, int64_t eos_token_id = 0);
 
     ~GrammarLogitsProcessor() override;
 
@@ -34,7 +36,7 @@ public:
     int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
 
     int64_t committedOutputLen() const override {
-        return mask_core_.acceptedTokenLen();
+        return accepted_token_len_;
     }
 
     bool hasError() const override {
@@ -46,6 +48,31 @@ public:
     }
 
 private:
+    enum class RowState {
+        Active,
+        Finished,
+        Terminated,
+        Failed,
+    };
+
+    enum class DeviceMaskMode {
+        UNSET,
+        NOOP,
+        MASK,
+        PASSTHROUGH,
+        TERMINATED,
+        FINISHED,
+    };
+
+    struct DeviceMaskState {
+        DeviceMaskMode              mode      = DeviceMaskMode::UNSET;
+        int64_t                     token_len = -1;
+        c10::Device                 device    = c10::Device(c10::DeviceType::CPU);
+        torch::Tensor               vocab_mask;
+        int32_t                     grammar_vocab_size = 0;
+        std::shared_ptr<c10::Event> mask_ready;
+    };
+
     void setError(ErrorCode code, std::string msg) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!has_error_.load(std::memory_order_relaxed)) {
@@ -60,7 +87,43 @@ private:
         setError(info.code(), info.ToString());
     }
 
-    GrammarMaskCore    mask_core_;
+    bool    finished() const;
+    bool    isTerminated() const;
+    int64_t numAcceptedTokens() const;
+    int32_t vocabSize() const;
+    void    markFinished();
+    void    rollback(int n);
+    bool    acceptToken(int32_t token_id);
+
+    DeviceMaskState buildDeviceMaskStateLocked(const c10::Device& device, ErrorInfo& out_err);
+    void            publishMaskToDevice(DeviceMaskState& state, torch::Tensor vocab_mask, const c10::Device& device);
+    void            applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state);
+    void            applyMaskLocked(const torch::Tensor& logits, ErrorInfo& out_err);
+    void            acceptCommittedLocked(const int32_t* tokens, size_t n, ErrorInfo& out_err);
+
+    ErrorInfo preflightSpecRequest(const SpecLogitsProcessorRequest& request) const;
+    ErrorInfo validateMatcherInvariantsLocked(const SpecLogitsProcessorRequest& request);
+    RowState  fillGrammarRowLocked(int32_t* row, size_t W, size_t model_vocab_size);
+    int       runSpecVerifyGuarded(
+              int32_t*                                                                     bitmask_cpu_out,
+              size_t                                                                       W,
+              const char*                                                                  who,
+              const std::function<int(int& grammar_accepted_prefix, ErrorInfo& walk_err)>& walk,
+              ErrorInfo&                                                                   out_err);
+    int runSpecVerifyLocked(const SpecLogitsProcessorRequest& request, ErrorInfo& out_err);
+
+    static void forceToken(const torch::Tensor& logits, int64_t token_id);
+    static void maskToken(const torch::Tensor& logits, int64_t token_id);
+
+    std::shared_ptr<GrammarMatcher> matcher_;
+    int64_t                         eos_token_id_       = 0;
+    int64_t                         accepted_token_len_ = 0;
+    std::optional<c10::Device>      last_mask_device_;
+    DeviceMaskState                 device_mask_state_{};
+    torch::Tensor                   reusable_bitmask_cpu_;
+    torch::Tensor                   reusable_vocab_mask_cpu_;
+    int32_t                         reusable_mask_words_ = 0;
+
     mutable std::mutex state_mutex_;
     std::atomic<bool>  has_error_{false};
     ErrorInfo          error_info_;

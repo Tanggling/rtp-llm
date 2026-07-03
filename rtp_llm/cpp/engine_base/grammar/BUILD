@@ -38,10 +38,13 @@ cc_library(
 cc_library(
     name = "grammar_xgrammar",
     hdrs = [
+        "BudgetedReasoningGrammarMatcher.h",
+        "GrammarMatcher.h",
         "RtpGrammarMatcher.h",
         "XGrammarBackend.h",
     ],
     srcs = [
+        "BudgetedReasoningGrammarMatcher.cc",
         "RtpGrammarMatcher.cc",
         "XGrammarBackend.cc",
     ],
