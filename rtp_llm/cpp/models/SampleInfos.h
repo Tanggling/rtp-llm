@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <unordered_set>
 #include <vector>
 
 #include <torch/all.h>
@@ -11,7 +10,6 @@
 
 namespace rtp_llm {
 
-class BaseLogitsProcessor;
 class LogitsProcessorStates;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
@@ -68,9 +66,6 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
-
-    // Processors whose effects were materialized into logits before LogitsProcessorStates::batchProcess().
-    std::unordered_set<BaseLogitsProcessor*> spec_applied_processors;
 };
 
 struct SamplerOutput {

@@ -157,7 +157,6 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     sampler_inputs.logits = model_output.logits.clone();
     if (spec_logits_result.has_active_processor) {
-        sampler_inputs.spec_applied_processors = spec_logits_result.applied_processors;
         SpecLogitsVerifyRunner::applyMaskToLogits(
             sampler_inputs.logits, spec_logits_result.spec_vocab_mask_gpu, sampler_inputs.vocab_size);
     }

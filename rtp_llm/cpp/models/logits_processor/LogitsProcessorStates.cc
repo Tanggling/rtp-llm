@@ -10,9 +10,6 @@ LogitsProcessorStates::LogitsProcessorStates() {};
 
 void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
     for (size_t i = 0; i < logits_processors_.size(); i++) {
-        if (inputs.spec_applied_processors.count(logits_processors_[i].get())) {
-            continue;
-        }
         // process() never throws; errors are stored on the processor (hasError()/error())
         // and pulled by the owning GenerateStream on its next update tick.
         logits_processors_[i]->process(inputs, intervals_[i].first, intervals_[i].second);

@@ -30,7 +30,9 @@ public:
     virtual bool isStateful() const {
         return false;
     }
-    ScoreBatchRole scoreBatchRole() const;
+    virtual ScoreBatchRole scoreBatchRole() const {
+        return isStateful() ? ScoreBatchRole::kIncompatible : ScoreBatchRole::kStatelessProcess;
+    }
     // Number of committed *output* tokens from this processor's point of view.
     // MUST stay aligned with GenerateStream::outputTokenLen() (seqLength - inputLength);
     // GenerateStream::validateStatefulLogitsProcessorState() compares the two and errors on

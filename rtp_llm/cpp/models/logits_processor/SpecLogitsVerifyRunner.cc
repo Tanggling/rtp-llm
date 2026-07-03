@@ -188,7 +188,6 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), row_words);
         auto* cap_ptr            = spec_cap_cpu_.data_ptr<int32_t>();
         cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
-        result.applied_processors.insert(item.base_id);
         this_active_rows.push_back(item.stream_idx);
     }
 

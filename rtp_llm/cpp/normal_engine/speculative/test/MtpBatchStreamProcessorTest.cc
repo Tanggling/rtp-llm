@@ -243,8 +243,8 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
 
-    ResourceContext resource_context;
-    GenerateStreamPtr stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
+    ResourceContext   resource_context;
+    GenerateStreamPtr stream        = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
     auto              stream_groups = StreamGroups({stream});
 
     cache_config.group_types = {CacheGroupType::FULL};
@@ -254,8 +254,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     model_output.logits =
-        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f, 2.1f, 2.2f, 2.3f, 2.4f},
-                      torch::kFloat32)
+        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f, 2.1f, 2.2f, 2.3f, 2.4f}, torch::kFloat32)
             .reshape({3, 4})
             .to(torch::kCUDA);
 
@@ -265,10 +264,9 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask
         torch::tensor({false, false, true, false, true, false, false, false, false, false, false, true}, torch::kBool)
             .reshape({3, 4})
             .to(torch::kCUDA);
-    BaseLogitsProcessor* applied_processor = reinterpret_cast<BaseLogitsProcessor*>(0x1234);
-    spec_logits_result.applied_processors.insert(applied_processor);
 
-    auto sampler_inputs = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_logits_result);
+    auto sampler_inputs =
+        processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_logits_result);
     ASSERT_TRUE(sampler_inputs.ok());
 
     auto logits = sampler_inputs.value().logits.cpu().contiguous();
@@ -277,7 +275,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask
     EXPECT_LT(logits.data_ptr<float>()[4], -1e20f);
     EXPECT_FLOAT_EQ(logits.data_ptr<float>()[5], 1.2f);
     EXPECT_LT(logits.data_ptr<float>()[11], -1e20f);
-    EXPECT_TRUE(sampler_inputs.value().spec_applied_processors.count(applied_processor));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {

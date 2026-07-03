@@ -1067,7 +1067,7 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
             if (spec_processor) {
-                task.active.push_back({spec_processor, processor.get(), stream_idx});
+                task.active.push_back({spec_processor, stream_idx});
             }
         }
         ++stream_idx;

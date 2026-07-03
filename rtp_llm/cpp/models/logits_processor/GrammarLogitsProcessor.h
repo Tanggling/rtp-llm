@@ -13,12 +13,11 @@
 #include <c10/core/Event.h>
 
 #include "rtp_llm/cpp/engine_base/grammar/GrammarMatcher.h"
-#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
 namespace rtp_llm {
 
-class GrammarLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
+class GrammarLogitsProcessor final: public SpecLogitsProcessor {
 public:
     explicit GrammarLogitsProcessor(std::shared_ptr<GrammarMatcher> matcher, int64_t eos_token_id = 0);
 
@@ -104,13 +103,12 @@ private:
     ErrorInfo preflightSpecRequest(const SpecLogitsProcessorRequest& request) const;
     ErrorInfo validateMatcherInvariantsLocked(const SpecLogitsProcessorRequest& request);
     RowState  fillGrammarRowLocked(int32_t* row, size_t W, size_t model_vocab_size);
-    int       runSpecVerifyGuarded(
-              int32_t*                                                                     bitmask_cpu_out,
-              size_t                                                                       W,
-              const char*                                                                  who,
-              const std::function<int(int& grammar_accepted_prefix, ErrorInfo& walk_err)>& walk,
-              ErrorInfo&                                                                   out_err);
-    int runSpecVerifyLocked(const SpecLogitsProcessorRequest& request, ErrorInfo& out_err);
+    int       runSpecVerifyGuarded(int32_t*    bitmask_cpu_out,
+                                   size_t      W,
+                                   const char* who,
+                                   const std::function<int(int& grammar_accepted_prefix, ErrorInfo& walk_err)>& walk,
+                                   ErrorInfo&                                                                   out_err);
+    int       runSpecVerifyLocked(const SpecLogitsProcessorRequest& request, ErrorInfo& out_err);
 
     static void forceToken(const torch::Tensor& logits, int64_t token_id);
     static void maskToken(const torch::Tensor& logits, int64_t token_id);

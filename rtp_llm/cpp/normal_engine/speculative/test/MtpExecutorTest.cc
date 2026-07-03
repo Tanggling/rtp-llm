@@ -258,7 +258,7 @@ private:
     TestDataHolder<SamplerOutput> output_holder;
 };
 
-class FakeGrammarSpecLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
+class FakeGrammarSpecLogitsProcessor: public SpecLogitsProcessor {
 public:
     FakeGrammarSpecLogitsProcessor(std::vector<std::vector<int32_t>> allowed_tokens_by_row, int cap):
         allowed_tokens_by_row_(std::move(allowed_tokens_by_row)), cap_(cap) {}
@@ -512,12 +512,12 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
     const int    propose_step = 2;
     const size_t vocab_size   = 8;
 
-    auto proc_a = std::make_shared<FakeGrammarSpecLogitsProcessor>(
-        std::vector<std::vector<int32_t>>{{1, 2}, {2}, {3}}, /*cap=*/propose_step + 3);
+    auto proc_a = std::make_shared<FakeGrammarSpecLogitsProcessor>(std::vector<std::vector<int32_t>>{{1, 2}, {2}, {3}},
+                                                                   /*cap=*/propose_step + 3);
     auto proc_b = std::make_shared<FakeGrammarSpecLogitsProcessor>(
         std::vector<std::vector<int32_t>>{{2, 3}, {2, 3}, {0, 3}}, /*cap=*/1);
-    auto proc_c = std::make_shared<FakeGrammarSpecLogitsProcessor>(
-        std::vector<std::vector<int32_t>>{{0}, {1}, {2}}, /*cap=*/propose_step + 1);
+    auto proc_c = std::make_shared<FakeGrammarSpecLogitsProcessor>(std::vector<std::vector<int32_t>>{{0}, {1}, {2}},
+                                                                   /*cap=*/propose_step + 1);
 
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams = batch_size;
@@ -525,9 +525,9 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
     task.vocab_size    = vocab_size;
     task.draft_tokens  = torch::tensor({11, 12, 21, 22}, torch::kInt32).reshape({2, 2});
     task.active        = {
-        {proc_a, proc_a.get(), 0},
-        {proc_b, proc_b.get(), 0},
-        {proc_c, proc_c.get(), 1},
+        {proc_a, 0},
+        {proc_b, 0},
+        {proc_c, 1},
     };
 
     SpecLogitsVerifyRunner runner;
@@ -535,10 +535,6 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
 
     ASSERT_TRUE(result.has_active_processor);
     ASSERT_TRUE(result.spec_vocab_mask_cpu_owner.defined());
-    EXPECT_EQ(result.applied_processors.size(), 3);
-    EXPECT_TRUE(result.applied_processors.count(proc_a.get()));
-    EXPECT_TRUE(result.applied_processors.count(proc_b.get()));
-    EXPECT_TRUE(result.applied_processors.count(proc_c.get()));
     EXPECT_EQ(proc_a->observed_draft_tokens, (std::vector<int32_t>{11, 12}));
     EXPECT_EQ(proc_c->observed_draft_tokens, (std::vector<int32_t>{21, 22}));
     EXPECT_EQ(toVec<int32_t>(result.spec_cap_cpu_owner), (std::vector<int32_t>{1, propose_step}));

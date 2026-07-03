@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <memory>
 
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+
 namespace rtp_llm {
 
 struct SpecLogitsProcessorRequest {
@@ -17,9 +19,15 @@ struct SpecLogitsProcessorRequest {
     size_t   vocab_size         = 0;
 };
 
-class SpecLogitsProcessor {
+class SpecLogitsProcessor: public BaseLogitsProcessor {
 public:
-    virtual ~SpecLogitsProcessor() = default;
+    ~SpecLogitsProcessor() override = default;
+
+    // Keep score-batch classification tied to the same eligibility predicate used by
+    // SpecLogitsVerifyRunner, so implementations cannot diverge from the verify path.
+    ScoreBatchRole scoreBatchRole() const final override {
+        return isSpecVerifyEligible() ? ScoreBatchRole::kSpecVerify : ScoreBatchRole::kIncompatible;
+    }
 
     virtual bool isSpecVerifyEligible() const = 0;
 

@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
@@ -11,18 +10,6 @@ using namespace std;
 namespace rtp_llm {
 
 const float BaseLogitsProcessor::neg_inf = -std::numeric_limits<float>::max();
-
-ScoreBatchRole BaseLogitsProcessor::scoreBatchRole() const {
-    if (!isStateful()) {
-        return ScoreBatchRole::kStatelessProcess;
-    }
-    if (const auto* spec = dynamic_cast<const SpecLogitsProcessor*>(this)) {
-        if (spec->isSpecVerifyEligible()) {
-            return ScoreBatchRole::kSpecVerify;
-        }
-    }
-    return ScoreBatchRole::kIncompatible;
-}
 
 void BaseLogitsProcessor::memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index) {
     RTP_LLM_CHECK(new_tokens_logits.dim() == 1);
