@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 #include <xgrammar/tokenizer_info.h>
 
@@ -15,21 +16,20 @@ namespace {
 
 using JsonMap = autil::legacy::json::JsonMap;
 
-int64_t jsonMapInt64(const JsonMap& map, const char* key) {
-    const auto it = map.find(key);
-    if (it == map.end()) {
-        throw std::runtime_error(std::string("cookTokenizerInfoOpaque: metadata missing key '") + key + "'");
-    }
-    if (const auto* v = autil::legacy::AnyCast<int64_t>(&it->second)) {
+int64_t parseVocabTypeValue(const autil::legacy::Any& value) {
+    if (const auto* v = autil::legacy::AnyCast<int64_t>(&value)) {
         return *v;
     }
-    if (const auto* v = autil::legacy::AnyCast<int>(&it->second)) {
+    if (const auto* v = autil::legacy::AnyCast<int>(&value)) {
         return *v;
     }
-    if (const auto* v = autil::legacy::AnyCast<int32_t>(&it->second)) {
+    if (const auto* v = autil::legacy::AnyCast<int32_t>(&value)) {
         return *v;
     }
-    throw std::runtime_error(std::string("cookTokenizerInfoOpaque: metadata key '") + key + "' is not an integer");
+    if (autil::legacy::json::IsJsonNumber(value)) {
+        return autil::legacy::json::JsonNumberCast<int64_t>(value);
+    }
+    throw std::runtime_error("cookTokenizerInfoOpaque: metadata key 'vocab_type' is not a JSON number");
 }
 
 bool jsonMapBool(const JsonMap& map, const char* key) {
@@ -39,6 +39,15 @@ bool jsonMapBool(const JsonMap& map, const char* key) {
     }
     if (const auto* v = autil::legacy::AnyCast<bool>(&it->second)) {
         return *v;
+    }
+    if (autil::legacy::json::IsJsonNumber(it->second)) {
+        return autil::legacy::json::JsonNumberCast<int64_t>(it->second) != 0;
+    }
+    if (const auto* v = autil::legacy::AnyCast<int64_t>(&it->second)) {
+        return *v != 0;
+    }
+    if (const auto* v = autil::legacy::AnyCast<int>(&it->second)) {
+        return *v != 0;
     }
     throw std::runtime_error(std::string("cookTokenizerInfoOpaque: metadata key '") + key + "' is not a bool");
 }
@@ -61,7 +70,7 @@ HfTokenizerMetadata detectMetadataFromHf(const std::string& backend_tokenizer_st
     if (!map) {
         throw std::runtime_error("cookTokenizerInfoOpaque: metadata is not a JSON object: '" + meta_json + "'");
     }
-    const int64_t vocab_type_val = jsonMapInt64(*map, "vocab_type");
+    const int64_t vocab_type_val = parseVocabTypeValue(map->at("vocab_type"));
     if (vocab_type_val < static_cast<int64_t>(xgrammar::VocabType::RAW)
         || vocab_type_val > static_cast<int64_t>(xgrammar::VocabType::BYTE_LEVEL)) {
         throw std::runtime_error("cookTokenizerInfoOpaque: unsupported vocab_type " + std::to_string(vocab_type_val));

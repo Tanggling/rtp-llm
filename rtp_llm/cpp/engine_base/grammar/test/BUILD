@@ -17,3 +17,14 @@ cc_test(
     ],
     copts = copts() + ["-fno-access-control"],
 )
+
+cc_test(
+    name = "xgrammar_tokenizer_info_cooker_test",
+    srcs = ["XGrammarTokenizerInfoCookerTest.cc"],
+    deps = [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:json",
+    ],
+    copts = copts() + ["-fno-access-control"],
+)

@@ -12,7 +12,7 @@ cc_library(
         "@havenask//aios/autil:json",
         "@xgrammar//:xgrammar",
     ],
-    visibility = ["//visibility:private"],
+    visibility = ["//rtp_llm/cpp/engine_base/grammar/test:__pkg__"],
     copts = copts(),
 )
 
