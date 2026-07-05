@@ -550,7 +550,7 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
     };
 
     SpecLogitsVerifyRunner runner;
-    auto                   result = runner.buildInline(task);
+    auto                   result = runner.run(task);
 
     ASSERT_TRUE(result.has_active_processor);
     ASSERT_TRUE(result.spec_vocab_mask_cpu_lifetime.defined());
@@ -589,7 +589,7 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerRejectsUnexpectedDraftColumns)
     task.active        = {{proc, 0}};
 
     SpecLogitsVerifyRunner runner;
-    EXPECT_THROW((void)runner.buildInline(task), std::runtime_error);
+    EXPECT_THROW((void)runner.run(task), std::runtime_error);
 }
 
 TEST_F(MtpExecutorTest, testPrepareStreamsRejectsNormalDecodeOnlyProcessor) {

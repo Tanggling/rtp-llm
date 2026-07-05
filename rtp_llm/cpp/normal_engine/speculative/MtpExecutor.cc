@@ -1092,7 +1092,7 @@ MtpExecutor::runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams, co
         }
         ++stream_idx;
     }
-    return spec_logits_verify_runner_.buildInline(task);
+    return spec_logits_verify_runner_.run(task);
 }
 
 }  // namespace rtp_llm

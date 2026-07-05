@@ -759,11 +759,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (hasError() && !update_info.force_update_info) {
         return;
     }
-    // Ignore stale worker updates after finish; committing them would duplicate
-    // tokens and touch KV blocks only deferred until this worker exits.
-    if (isFinished() && !update_info.force_update_info) {
-        return;
-    }
 
     const auto& new_tokens = update_info.new_tokens;
 
@@ -856,11 +851,6 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
     // Drain processor errors stashed during the prior sampler tick (off-stream-mutex).
     pollLogitsProcessorErrors();
     if (hasError() && !update_info.force_update_info) {
-        return;
-    }
-    // Ignore stale worker updates after finish; committing them would duplicate
-    // tokens and touch KV blocks only deferred until this worker exits.
-    if (isFinished() && !update_info.force_update_info) {
         return;
     }
 

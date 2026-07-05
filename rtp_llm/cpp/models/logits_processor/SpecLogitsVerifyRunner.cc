@@ -143,8 +143,90 @@ void SpecLogitsVerifyRunner::unpackRowToBoolDisallow(size_t row, size_t vocab_si
     }
 }
 
-SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const LaunchTask& task) {
-    RTP_LLM_PROFILE_SCOPE("spec_logits_verify_runner.build_inline");
+std::vector<size_t> SpecLogitsVerifyRunner::resetPreviousActiveRows(const VerifyShape& shape) {
+    auto*               merged_base = merged_bitmask_cpu_.data_ptr<int32_t>();
+    std::vector<size_t> rows_to_reset;
+    rows_to_reset.reserve(last_active_stream_rows_.size());
+
+    for (size_t prev : last_active_stream_rows_) {
+        if (prev < shape.buffer_rows) {
+            std::fill_n(merged_base + prev * shape.row_words, shape.row_words, SpecLogitsProcessor::kBitmaskAllowAll);
+            rows_to_reset.push_back(prev);
+        }
+    }
+    return rows_to_reset;
+}
+
+std::vector<size_t> SpecLogitsVerifyRunner::mergeProcessorMasks(const LaunchTask& task, const VerifyShape& shape) {
+    auto proc_mask = processor_bitmask_cpu_.narrow(0, 0, shape.propose_step + 1)
+                         .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
+    auto*               merged_base = merged_bitmask_cpu_.data_ptr<int32_t>();
+    auto*               cap_ptr     = spec_cap_cpu_.data_ptr<int32_t>();
+    std::vector<size_t> active_rows;
+    active_rows.reserve(task.active.size());
+
+    for (const auto& item : task.active) {
+        RTP_LLM_CHECK_WITH_INFO(item.processor != nullptr, "MTP spec logits verify active processor is null");
+        RTP_LLM_CHECK_WITH_INFO(item.stream_idx < shape.batch_size,
+                                "MTP spec logits verify stream_idx=%zu out of range, total_streams=%zu",
+                                item.stream_idx,
+                                shape.batch_size);
+
+        fillAllAllowBitmask(proc_mask);
+        SpecLogitsProcessorRequest request;
+        request.draft_tokens       = draft_tokens_cpu_.data_ptr<int32_t>() + item.stream_idx * shape.propose_step;
+        request.propose_step       = shape.propose_step;
+        request.bitmask_cpu_out    = proc_mask.data_ptr<int32_t>();
+        request.bitmask_size_int32 = shape.bitmask_words;
+        request.vocab_size         = shape.vocab_size;
+
+        // Never throws; errors stash on the processor and surface via hasError() later.
+        const int cap = std::max(0, std::min(item.processor->tryAcceptAndFillBitmask(request), shape.propose_step));
+
+        auto* merged_row = merged_base + item.stream_idx * shape.row_words;
+        bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), shape.row_words);
+        cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
+        appendUniqueRow(active_rows, item.stream_idx);
+    }
+    return active_rows;
+}
+
+void SpecLogitsVerifyRunner::uploadChangedRows(const std::vector<size_t>& rows_to_reset,
+                                               const std::vector<size_t>& active_rows,
+                                               const VerifyShape&         shape) {
+    auto upload_stream_row = [&](size_t stream_row) {
+        const size_t row_begin = stream_row * static_cast<size_t>(shape.propose_step + 1);
+        for (size_t row = row_begin; row < row_begin + static_cast<size_t>(shape.propose_step + 1); ++row) {
+            unpackRowToBoolDisallow(row, shape.vocab_size, shape.bitmask_words);
+        }
+        auto cpu_slice = disallow_mask_cpu_.narrow(0, row_begin, shape.propose_step + 1)
+                             .narrow(1, 0, static_cast<int64_t>(shape.vocab_size));
+        auto gpu_slice = disallow_mask_gpu_.narrow(0, row_begin, shape.propose_step + 1)
+                             .narrow(1, 0, static_cast<int64_t>(shape.vocab_size));
+        gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
+    };
+
+    for (size_t row : rows_to_reset) {
+        upload_stream_row(row);
+    }
+    for (size_t row : active_rows) {
+        upload_stream_row(row);
+    }
+}
+
+SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const VerifyShape& shape) {
+    LaunchResult result;
+    result.spec_vocab_mask_gpu = disallow_mask_gpu_.narrow(0, 0, static_cast<int64_t>(shape.rows))
+                                     .narrow(1, 0, static_cast<int64_t>(shape.vocab_size));
+    result.has_active_processor = true;
+    result.spec_vocab_mask_cpu_lifetime = disallow_mask_cpu_.narrow(0, 0, static_cast<int64_t>(shape.rows))
+                                              .narrow(1, 0, static_cast<int64_t>(shape.vocab_size));
+    result.spec_cap_cpu = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(shape.batch_size));
+    return result;
+}
+
+SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTask& task) {
+    RTP_LLM_PROFILE_SCOPE("spec_logits_verify_runner.run");
     LaunchResult result;
 
     if (task.active.empty()) {
@@ -158,83 +240,19 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     const size_t W    = SpecLogitsProcessor::bitmaskWordCount(V);
     const size_t rows = B * static_cast<size_t>(P + 1);
 
+    VerifyShape shape{B, P, V, W, rows, static_cast<size_t>(P + 1) * W, 0};
+
     ensureBuffersFit(B, P, V, W);
-    bool draft_tokens_materialized = false;
+    shape.buffer_rows = static_cast<size_t>(merged_bitmask_cpu_.size(0)) / static_cast<size_t>(P + 1);
 
-    auto*        merged_base = merged_bitmask_cpu_.data_ptr<int32_t>();
-    const size_t row_words   = static_cast<size_t>(P + 1) * W;
-    const size_t buffer_rows = static_cast<size_t>(merged_bitmask_cpu_.size(0)) / static_cast<size_t>(P + 1);
-
-    // Reset prev-call active rows (packed allow-all). Bool unpack happens after AND merge below.
-    std::vector<size_t> rows_to_reset;
-    rows_to_reset.reserve(last_active_stream_rows_.size());
-    for (size_t prev : last_active_stream_rows_) {
-        if (prev < buffer_rows) {
-            std::fill_n(merged_base + prev * row_words, row_words, SpecLogitsProcessor::kBitmaskAllowAll);
-            rows_to_reset.push_back(prev);
-        }
-    }
+    auto rows_to_reset = resetPreviousActiveRows(shape);
     std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
 
-    auto                proc_mask = processor_bitmask_cpu_.narrow(0, 0, P + 1).narrow(1, 0, static_cast<int64_t>(W));
-    std::vector<size_t> this_active_rows;
-    this_active_rows.reserve(task.active.size());
-    for (const auto& item : task.active) {
-        RTP_LLM_CHECK_WITH_INFO(item.processor != nullptr, "MTP spec logits verify active processor is null");
-        RTP_LLM_CHECK_WITH_INFO(item.stream_idx < B,
-                                "MTP spec logits verify stream_idx=%zu out of range, total_streams=%zu",
-                                item.stream_idx,
-                                B);
-        if (!draft_tokens_materialized) {
-            materializeDraftTokensToCpu(task);
-            draft_tokens_materialized = true;
-        }
-
-        fillAllAllowBitmask(proc_mask);
-        SpecLogitsProcessorRequest request;
-        request.draft_tokens       = draft_tokens_cpu_.data_ptr<int32_t>() + item.stream_idx * P;
-        request.propose_step       = P;
-        request.bitmask_cpu_out    = proc_mask.data_ptr<int32_t>();
-        request.bitmask_size_int32 = W;
-        request.vocab_size         = V;
-
-        // Never throws; errors stash on the processor and surface via hasError() later.
-        const int cap = std::max(0, std::min(item.processor->tryAcceptAndFillBitmask(request), P));
-
-        auto* merged_row = merged_base + item.stream_idx * row_words;
-        bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), row_words);
-        auto* cap_ptr            = spec_cap_cpu_.data_ptr<int32_t>();
-        cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
-        appendUniqueRow(this_active_rows, item.stream_idx);
-    }
-
-    auto upload_row_bool = [&](size_t stream_row) {
-        const size_t row_begin = stream_row * static_cast<size_t>(P + 1);
-        for (size_t r = row_begin; r < row_begin + static_cast<size_t>(P + 1); ++r) {
-            unpackRowToBoolDisallow(r, V, W);
-        }
-        auto cpu_slice = disallow_mask_cpu_.narrow(0, row_begin, P + 1).narrow(1, 0, V);
-        auto gpu_slice = disallow_mask_gpu_.narrow(0, row_begin, P + 1).narrow(1, 0, V);
-        gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
-    };
-
-    auto mask_gpu = disallow_mask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(V));
-    auto cap_cpu  = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
-
-    for (size_t row : rows_to_reset) {
-        upload_row_bool(row);
-    }
-    for (size_t row : this_active_rows) {
-        upload_row_bool(row);
-    }
-    last_active_stream_rows_ = std::move(this_active_rows);
-
-    result.spec_vocab_mask_gpu  = mask_gpu;
-    result.has_active_processor = true;
-    result.spec_vocab_mask_cpu_lifetime =
-        disallow_mask_cpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(V));
-    result.spec_cap_cpu = cap_cpu;
-    return result;
+    materializeDraftTokensToCpu(task);
+    auto active_rows = mergeProcessorMasks(task, shape);
+    uploadChangedRows(rows_to_reset, active_rows, shape);
+    last_active_stream_rows_ = std::move(active_rows);
+    return makeResult(shape);
 }
 
 }  // namespace rtp_llm

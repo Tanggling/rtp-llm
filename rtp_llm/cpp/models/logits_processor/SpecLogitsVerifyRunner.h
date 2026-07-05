@@ -41,14 +41,30 @@ public:
     SpecLogitsVerifyRunner(const SpecLogitsVerifyRunner&)            = delete;
     SpecLogitsVerifyRunner& operator=(const SpecLogitsVerifyRunner&) = delete;
 
-    LaunchResult buildInline(const LaunchTask& task);
+    LaunchResult run(const LaunchTask& task);
     static void
     applyMaskToLogits(const torch::Tensor& logits, const torch::Tensor& spec_vocab_mask_gpu, size_t vocab_size);
 
 private:
+    struct VerifyShape {
+        size_t batch_size    = 0;
+        int    propose_step  = 0;
+        size_t vocab_size    = 0;
+        size_t bitmask_words = 0;
+        size_t rows          = 0;
+        size_t row_words     = 0;
+        size_t buffer_rows   = 0;
+    };
+
     void ensureBuffersFit(size_t total_streams, int propose_step, size_t vocab_size, size_t bitmask_words);
     void materializeDraftTokensToCpu(const LaunchTask& task);
     void unpackRowToBoolDisallow(size_t row, size_t vocab_size, size_t bitmask_words);
+    std::vector<size_t> resetPreviousActiveRows(const VerifyShape& shape);
+    std::vector<size_t> mergeProcessorMasks(const LaunchTask& task, const VerifyShape& shape);
+    void                uploadChangedRows(const std::vector<size_t>& rows_to_reset,
+                                          const std::vector<size_t>& active_rows,
+                                          const VerifyShape&         shape);
+    LaunchResult        makeResult(const VerifyShape& shape);
 
     torch::Tensor draft_tokens_cpu_;
     torch::Tensor processor_bitmask_cpu_;
