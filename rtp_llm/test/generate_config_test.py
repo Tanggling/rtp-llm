@@ -14,8 +14,12 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.response_format import ResponseFormat
-from rtp_llm.config.response_format_builder import ReasoningFormat, ResponseFormatBuilder
+from rtp_llm.config.response_format_builder import (
+    ReasoningFormat,
+    ResponseFormatBuilder,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
@@ -660,6 +664,22 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertIsNone(cfg.response_format)
         self.assertEqual(cfg.json_schema, '{"type":"object"}')
 
+    def test_response_format_maps_to_canonical_grammar_constraint(self):
+        rf = ResponseFormat(
+            type="json_schema",
+            json_schema={"schema": {"type": "string", "title": "测试"}},
+        )
+
+        constraint = GrammarConstraint.from_response_format(rf)
+
+        self.assertIsNotNone(constraint)
+        assert constraint is not None
+        self.assertEqual(constraint.name, "json_schema")
+        self.assertEqual(
+            constraint.as_config_update()["json_schema"],
+            '{"type":"string","title":"测试"}',
+        )
+
     def test_json_schema_envelope_projected(self):
         cfg = GenerateConfig(
             response_format={
@@ -749,9 +769,7 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertEqual(elements[0]["type"], "tag")
         self.assertEqual(elements[0]["begin"], "")
         self.assertEqual(elements[0]["end"], "</think>\n\n")
-        self.assertEqual(
-            elements[0]["content"], {"type": "any_text", "max_tokens": 64}
-        )
+        self.assertEqual(elements[0]["content"], {"type": "any_text", "max_tokens": 64})
         self.assertEqual(elements[1]["type"], "json_schema")
         self.assertEqual(elements[1]["json_schema"], {"type": "object"})
         self.assertEqual(elements[1]["style"], "json")
@@ -854,7 +872,9 @@ class ResponseFormatProjectionTest(TestCase):
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[1], {"type": "regex", "pattern": "a+"})
 
-    def test_reasoning_external_prewrapped_structural_tag_is_not_treated_as_idempotent(self):
+    def test_reasoning_external_prewrapped_structural_tag_is_not_treated_as_idempotent(
+        self,
+    ):
         cfg = GenerateConfig(
             structural_tag={
                 "type": "structural_tag",
@@ -876,7 +896,9 @@ class ResponseFormatProjectionTest(TestCase):
 
         with self.assertRaises(FtRuntimeException) as ctx:
             self._validate(cfg, reasoning_format=reasoning_format)
-        self.assertEqual(ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
 
     def test_reasoning_final_structural_tag_with_existing_budget_rejected(self):
         cfg = GenerateConfig(
@@ -889,7 +911,9 @@ class ResponseFormatProjectionTest(TestCase):
 
         with self.assertRaises(FtRuntimeException) as ctx:
             self._validate(cfg, reasoning_format=reasoning_format)
-        self.assertEqual(ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
 
 
 class GrammarFieldNormalizationTest(TestCase):

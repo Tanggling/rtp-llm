@@ -30,8 +30,10 @@ public:
     struct LaunchResult {
         torch::Tensor spec_vocab_mask_gpu;  // [rows, V] bool, true=disallow
         bool          has_active_processor = false;
-        torch::Tensor spec_vocab_mask_cpu_owner;
-        torch::Tensor spec_cap_cpu_owner;
+        // Keeps the pinned CPU source for the async H2D mask copy alive until the
+        // caller has consumed spec_vocab_mask_gpu.
+        torch::Tensor spec_vocab_mask_cpu_lifetime;
+        torch::Tensor spec_cap_cpu;
     };
 
     SpecLogitsVerifyRunner() = default;

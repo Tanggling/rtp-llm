@@ -1,8 +1,5 @@
 #pragma once
 
-#include <memory>
-#include <vector>
-
 #include <torch/all.h>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"

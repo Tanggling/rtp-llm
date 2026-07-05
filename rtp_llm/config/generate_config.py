@@ -1,8 +1,8 @@
 import copy
 import hashlib
-import json
 import logging
 import time
+from json import JSONDecodeError
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import (
@@ -17,7 +17,10 @@ from pydantic import (
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.response_format import ResponseFormat
+from rtp_llm.config.response_format import (
+    ResponseFormat,
+    parse_response_format,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
@@ -390,34 +393,8 @@ class GenerateConfig(BaseModel):
 
     @field_validator("response_format", mode="before")
     @classmethod
-    def _coerce_response_format(cls, v):
-        """Coerce str/dict/ResponseFormat; ResponseFormat._check_payload rejects malformed envelopes here."""
-        if v is None:
-            return None
-        if isinstance(v, ResponseFormat):
-            return v
-        if isinstance(v, str):
-            stripped = v.strip()
-            if not stripped:
-                return None
-            v = json.loads(stripped)
-        if isinstance(v, dict):
-            if not v:
-                return None
-            return ResponseFormat(**v)
-        raise TypeError(f"response_format has unsupported type {type(v).__name__}")
-
-    @classmethod
-    def _coerce_response_format_for_update(cls, v):
-        try:
-            return cls._coerce_response_format(v)
-        except FtRuntimeException:
-            raise
-        except (json.JSONDecodeError, ValidationError, TypeError) as e:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                f"response_format invalid: {str(e)}",
-            )
+    def _parse_response_format(cls, v):
+        return parse_response_format(v)
 
     def gen_hash_value(self):
         cp = copy.copy(self)
@@ -441,6 +418,18 @@ class GenerateConfig(BaseModel):
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value
 
+    @staticmethod
+    def _normalize_update_value(key: str, value: Any) -> Any:
+        if key != "response_format":
+            return value
+        try:
+            return parse_response_format(value)
+        except (JSONDecodeError, ValidationError, TypeError) as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"response_format invalid: {str(e)}",
+            )
+
     def update(self, new: Dict[str, Any]):
         """批量更新字段。
 
@@ -453,9 +442,7 @@ class GenerateConfig(BaseModel):
         """
         for key, value in new.items():
             if hasattr(self, key):
-                if key == "response_format":
-                    value = self._coerce_response_format_for_update(value)
-                setattr(self, key, value)
+                setattr(self, key, self._normalize_update_value(key, value))
         # setattr 不会触发 field_validator / model_validator，手动补偿：
         # 1) cross_seq_diverge_start_combo 的 clamp/类型兜底
         if "cross_seq_diverge_start_combo" in new:
@@ -476,9 +463,7 @@ class GenerateConfig(BaseModel):
         to_remove: List[str] = []
         for key, value in new.items():
             if hasattr(self, key):
-                if key == "response_format":
-                    value = self._coerce_response_format_for_update(value)
-                setattr(self, key, value)
+                setattr(self, key, self._normalize_update_value(key, value))
                 to_remove.append(key)
         # setattr 不会触发 field_validator / model_validator，手动补偿：
         if "cross_seq_diverge_start_combo" in new:

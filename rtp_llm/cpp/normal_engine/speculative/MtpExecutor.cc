@@ -36,7 +36,7 @@ void applySpecLogitsCap(const SpecLogitsVerifyRunner::LaunchResult& spec_logits_
                         speculative::SpeculativeSamplerOutput&      output,
                         int64_t                                     batch_size,
                         int64_t                                     propose_step) {
-    if (!spec_logits_result.spec_cap_cpu_owner.defined()) {
+    if (!spec_logits_result.spec_cap_cpu.defined()) {
         return;
     }
 
@@ -49,7 +49,7 @@ void applySpecLogitsCap(const SpecLogitsVerifyRunner::LaunchResult& spec_logits_
                             output.accept_tokens.size(),
                             static_cast<long long>(batch_size));
 
-    auto cap_cpu = spec_logits_result.spec_cap_cpu_owner;
+    auto cap_cpu = spec_logits_result.spec_cap_cpu;
     if (cap_cpu.is_cuda()) {
         cap_cpu = cap_cpu.cpu();
     }
@@ -106,6 +106,14 @@ bool hasMtpIncompatibleProcessor(const GenerateStreamPtr& stream) {
     return std::any_of(processors.begin(), processors.end(), [](const auto& processor) {
         return processor && processor->scoreBatchRole() == ScoreBatchRole::kNormalDecodeOnly;
     });
+}
+
+bool needPrefillPhase(RoleType role_type) {
+    return role_type == RoleType::PREFILL || role_type == RoleType::PDFUSION;
+}
+
+bool needDecodePhase(RoleType role_type) {
+    return role_type == RoleType::DECODE || role_type == RoleType::PDFUSION;
 }
 
 }  // namespace
@@ -926,11 +934,13 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     // step forward
     int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
-    if (role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION) {
+    if (needPrefillPhase(role_type_)) {
         THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector));
     }
 
-    if ((role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) && !decode_streams.empty()) {
+    if (needDecodePhase(role_type_)) {
+        // decodeStep handles the empty-batch control path: TP non-root ranks
+        // rely on its skip_run broadcast to keep collectives matched.
         THROW_IF_STATUS_ERROR(decodeStep(decode_streams, metrics_collector));
     }
 
@@ -1081,10 +1091,13 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
     size_t stream_idx = 0;
     for (const auto& stream : streams) {
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
-            if (spec_processor) {
-                task.active.push_back({spec_processor, stream_idx});
+            if (!processor || processor->scoreBatchRole() != ScoreBatchRole::kSpecVerify) {
+                continue;
             }
+            auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
+            RTP_LLM_CHECK_WITH_INFO(spec_processor != nullptr,
+                                    "scoreBatchRole()==kSpecVerify requires SpecLogitsProcessor");
+            task.active.push_back({spec_processor, stream_idx});
         }
         ++stream_idx;
     }

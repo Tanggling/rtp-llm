@@ -1,6 +1,11 @@
+import json
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    model_validator,
+)
 
 
 class ResponseFormatJSONSchema(BaseModel):
@@ -39,3 +44,21 @@ class ResponseFormat(BaseModel):
                     "response_format.type=structural_tag requires structural_tag"
                 )
         return self
+
+
+def parse_response_format(value: Any) -> Optional[ResponseFormat]:
+    """Parse loose request payloads into a validated ResponseFormat envelope."""
+    if value is None:
+        return None
+    if isinstance(value, ResponseFormat):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        value = json.loads(stripped)
+    if isinstance(value, dict):
+        if not value:
+            return None
+        return ResponseFormat(**value)
+    raise TypeError(f"response_format has unsupported type {type(value).__name__}")

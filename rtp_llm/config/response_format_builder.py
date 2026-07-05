@@ -1,8 +1,15 @@
-import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.grammar_constraint import (
+    GRAMMAR_FIELD_NAMES,
+    GrammarConstraint,
+    dump_compact_json,
+    has_bounded_region,
+    load_json_field,
+    normalize_grammar_value,
+)
 
 
 DEFAULT_THINK_END_TAG = "</think>\n\n"
@@ -71,16 +78,12 @@ class ReasoningFormat:
 class ResponseFormatBuilder:
     """Normalize response_format and typed grammar fields in-place on GenerateConfig."""
 
-    def __init__(
-        self, config: Any, reasoning_format: Optional[ReasoningFormat] = None
-    ):
+    def __init__(self, config: Any, reasoning_format: Optional[ReasoningFormat] = None):
         self.config = config
         self.reasoning_format = reasoning_format or ReasoningFormat()
 
     def apply(self) -> None:
-        self._project_response_format_to_grammar_fields()
-        self._normalize_grammar_fields()
-        self._validate_grammar_constraints()
+        constraint = self._resolve_grammar_constraint()
 
         if not self.config.in_think_mode:
             return
@@ -88,7 +91,8 @@ class ResponseFormatBuilder:
         if self._reasoning_envelope_final_is_json() is not None:
             return
 
-        self._wrap_grammar_with_reasoning_envelope()
+        if constraint is not None:
+            self._wrap_grammar_with_reasoning_envelope(constraint)
 
     @classmethod
     def grammar_terminate_without_stop_token(cls, config: Any) -> bool:
@@ -103,70 +107,51 @@ class ResponseFormatBuilder:
         if rf is None:
             return
 
-        self.config.json_schema = None
-        self.config.regex = None
-        self.config.ebnf = None
-        self.config.structural_tag = None
-
-        if rf.type == "json_schema":
-            self.config.json_schema = json.dumps(
-                rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
-            )
-        elif rf.type == "json_object":
-            self.config.json_schema = json.dumps(
-                {"type": "object"}, separators=(",", ":")
-            )
-        elif rf.type == "regex":
-            self.config.regex = rf.pattern
-        elif rf.type == "ebnf":
-            self.config.ebnf = rf.grammar
-        elif rf.type == "structural_tag":
-            self.config.structural_tag = json.dumps(
-                rf.structural_tag, ensure_ascii=False, separators=(",", ":")
-            )
-        # rf.type == "text" leaves all grammar fields cleared.
+        self._clear_grammar_fields()
+        constraint = GrammarConstraint.from_response_format(rf)
+        if constraint is not None:
+            self._apply_constraint(constraint)
 
         self.config.response_format = None
 
+    def _resolve_grammar_constraint(self) -> Optional[GrammarConstraint]:
+        self._project_response_format_to_grammar_fields()
+        self._normalize_grammar_fields()
+        constraints = GrammarConstraint.collect_from_config(self.config)
+        self._validate_grammar_constraints(constraints)
+        if not constraints:
+            return None
+        return constraints[0]
+
+    def _clear_grammar_fields(self) -> None:
+        for name in GRAMMAR_FIELD_NAMES:
+            setattr(self.config, name, None)
+
+    def _apply_constraint(self, constraint: GrammarConstraint) -> None:
+        for name, value in constraint.as_config_update().items():
+            setattr(self.config, name, value)
+
     def _normalize_grammar_fields(self) -> None:
         """Normalize grammar fields before they cross backend/RPC boundaries."""
-        if isinstance(self.config.json_schema, dict):
-            self.config.json_schema = json.dumps(
-                self.config.json_schema, ensure_ascii=False, separators=(",", ":")
-            )
-        if isinstance(self.config.structural_tag, dict):
-            self.config.structural_tag = json.dumps(
-                self.config.structural_tag, ensure_ascii=False, separators=(",", ":")
-            )
+        for name in GRAMMAR_FIELD_NAMES:
+            value = getattr(self.config, name)
+            if value is not None:
+                setattr(self.config, name, normalize_grammar_value(name, value))
 
-    def _validate_grammar_constraints(self) -> None:
-        grammar_fields = {
-            "json_schema": self.config.json_schema,
-            "regex": self.config.regex,
-            "ebnf": self.config.ebnf,
-            "structural_tag": self.config.structural_tag,
-        }
-        for name, value in grammar_fields.items():
-            if isinstance(value, str) and not value.strip():
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    f"{name} must not be empty",
-                )
+    def _validate_grammar_constraints(
+        self, constraints: List[GrammarConstraint]
+    ) -> None:
+        for constraint in constraints:
+            constraint.validate_not_empty()
 
-        count = (
-            (self.config.json_schema is not None)
-            + (self.config.regex is not None)
-            + (self.config.ebnf is not None)
-            + (self.config.structural_tag is not None)
-        )
-        if count > 1:
+        if len(constraints) > 1:
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "only one grammar constraint (json_schema / regex / ebnf / "
                 "structural_tag) may be set per request",
             )
         # NormalOutputDispatcher skips per-token matcher advance under beam search, causing schema-illegal tokens.
-        if count > 0 and (
+        if constraints and (
             self.config.has_num_beams() or self.config.num_return_sequences > 1
         ):
             raise FtRuntimeException(
@@ -176,81 +161,10 @@ class ResponseFormatBuilder:
                 "(num_beams > 1 or num_return_sequences > 1)",
             )
 
-    @staticmethod
-    def _loads_json_field(name: str, value: Union[str, Dict[str, Any]]) -> Any:
-        if isinstance(value, dict):
-            return value
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError) as e:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                f"{name} must be valid JSON: {str(e)}",
-            )
-
-    @classmethod
-    def _has_bounded_region(cls, node: Any) -> bool:
-        if isinstance(node, dict):
-            if node.get("type") in ("any_text", "any_tokens") and node.get(
-                "max_tokens"
-            ) is not None:
-                return True
-            return any(cls._has_bounded_region(value) for value in node.values())
-        if isinstance(node, list):
-            return any(cls._has_bounded_region(item) for item in node)
-        return False
-
-    def _final_grammar_format_node(self) -> Optional[Dict[str, Any]]:
-        if self.config.json_schema is not None:
-            schema: Any
-            if self.config.json_schema == "$$ANY$$":
-                schema = True
-            else:
-                schema = self._loads_json_field(
-                    "json_schema", self.config.json_schema
-                )
-            if not isinstance(schema, (dict, bool)):
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "json_schema must be a JSON object or boolean",
-                )
-            return {"type": "json_schema", "json_schema": schema, "style": "json"}
-        if self.config.regex is not None:
-            return {"type": "regex", "pattern": self.config.regex}
-        if self.config.ebnf is not None:
-            return {"type": "grammar", "grammar": self.config.ebnf}
-        if self.config.structural_tag is not None:
-            structural_tag = self._loads_json_field(
-                "structural_tag", self.config.structural_tag
-            )
-            if not isinstance(structural_tag, dict):
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "structural_tag must be a JSON object",
-                )
-            format_node = structural_tag.get("format")
-            if structural_tag.get("type") != "structural_tag" or not isinstance(
-                format_node, dict
-            ):
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "structural_tag must have type='structural_tag' and a format object",
-                )
-            if self._has_bounded_region(format_node):
-                raise FtRuntimeException(
-                    ExceptionType.UNSUPPORTED_OPERATION,
-                    "reasoning grammar cannot wrap a final structural_tag that "
-                    "already contains any_text/any_tokens max_tokens",
-                )
-            return format_node
-        return None
-
     def _reasoning_envelope_final_is_json(self) -> Optional[bool]:
         if self.config.structural_tag is None:
             return None
-        structural_tag = self._loads_json_field(
-            "structural_tag", self.config.structural_tag
-        )
+        structural_tag = load_json_field("structural_tag", self.config.structural_tag)
         if not isinstance(structural_tag, dict):
             return None
         if structural_tag.get("type") != "structural_tag":
@@ -284,7 +198,7 @@ class ResponseFormatBuilder:
         final_format = elements[final_index]
         if not isinstance(final_format, dict):
             return None
-        if cls._has_bounded_region(final_format):
+        if has_bounded_region(final_format):
             return None
         return final_format
 
@@ -303,10 +217,10 @@ class ResponseFormatBuilder:
             and "end" in node
         )
 
-    def _wrap_grammar_with_reasoning_envelope(self) -> None:
-        final_format = self._final_grammar_format_node()
-        if final_format is None:
-            return
+    def _wrap_grammar_with_reasoning_envelope(
+        self, constraint: GrammarConstraint
+    ) -> None:
+        final_format = constraint.final_format_node()
         reasoning_prefix = self.reasoning_format.prefix_format(
             self.config.max_thinking_tokens
         )
@@ -321,9 +235,7 @@ class ResponseFormatBuilder:
                 "elements": elements,
             },
         }
-        self.config.structural_tag = json.dumps(
-            envelope, ensure_ascii=False, separators=(",", ":")
-        )
+        self.config.structural_tag = dump_compact_json(envelope)
         self.config.json_schema = None
         self.config.regex = None
         self.config.ebnf = None

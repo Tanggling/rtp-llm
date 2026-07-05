@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -25,6 +24,20 @@ void fillAllAllowBitmask(const torch::Tensor& tensor) {
 void bitwiseAndBitmaskInplace(int32_t* dst, const int32_t* src, size_t words) {
     for (size_t i = 0; i < words; ++i) {
         dst[i] &= src[i];
+    }
+}
+
+bool has1DCapacity(const torch::Tensor& tensor, int64_t size) {
+    return tensor.defined() && tensor.dim() == 1 && tensor.size(0) >= size;
+}
+
+bool has2DCapacity(const torch::Tensor& tensor, int64_t rows, int64_t cols) {
+    return tensor.defined() && tensor.dim() == 2 && tensor.size(0) >= rows && tensor.size(1) >= cols;
+}
+
+void appendUniqueRow(std::vector<size_t>& rows, size_t row) {
+    if (std::find(rows.begin(), rows.end(), row) == rows.end()) {
+        rows.push_back(row);
     }
 }
 
@@ -71,28 +84,28 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
     auto pinned_i32  = cpu_i32.pinned_memory(true);
     auto pinned_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true);
 
-    if (!draft_tokens_cpu_.defined() || draft_tokens_cpu_.numel() < B * P) {
+    if (!has2DCapacity(draft_tokens_cpu_, B, P)) {
         draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
     }
-    if (!processor_bitmask_cpu_.defined() || processor_bitmask_cpu_.numel() < (P + 1) * W) {
+    if (!has2DCapacity(processor_bitmask_cpu_, P + 1, W)) {
         processor_bitmask_cpu_ = torch::empty({P + 1, W}, pinned_i32);
     }
-    if (!merged_bitmask_cpu_.defined() || merged_bitmask_cpu_.numel() < rows * W) {
+    if (!has2DCapacity(merged_bitmask_cpu_, rows, W)) {
         merged_bitmask_cpu_ = torch::empty({rows, W}, pinned_i32);
         std::fill_n(merged_bitmask_cpu_.data_ptr<int32_t>(),
                     merged_bitmask_cpu_.numel(),
                     SpecLogitsProcessor::kBitmaskAllowAll);
         last_active_stream_rows_.clear();
     }
-    if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
+    if (!has1DCapacity(spec_cap_cpu_, B)) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
     auto cuda_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
-    if (!disallow_mask_cpu_.defined() || disallow_mask_cpu_.size(0) < rows || disallow_mask_cpu_.size(1) < V) {
+    if (!has2DCapacity(disallow_mask_cpu_, rows, V)) {
         disallow_mask_cpu_ = torch::zeros({rows, V}, pinned_bool);
         last_active_stream_rows_.clear();
     }
-    if (!disallow_mask_gpu_.defined() || disallow_mask_gpu_.size(0) < rows || disallow_mask_gpu_.size(1) < V) {
+    if (!has2DCapacity(disallow_mask_gpu_, rows, V)) {
         disallow_mask_gpu_ = torch::zeros({rows, V}, cuda_bool);
         last_active_stream_rows_.clear();
     }
@@ -107,11 +120,16 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
 
     const auto& draft_tokens = task.draft_tokens;
     RTP_LLM_CHECK_WITH_INFO(draft_tokens.defined(), "MTP spec logits verify requires draft tokens");
-    RTP_LLM_CHECK_WITH_INFO(draft_tokens.numel() >= B * P && draft_tokens.numel() % B == 0,
+    RTP_LLM_CHECK_WITH_INFO(draft_tokens.numel() % B == 0,
                             "MTP spec logits verify draft token shape mismatch");
     const int64_t draft_cols   = draft_tokens.numel() / B;
-    const int64_t draft_offset = draft_cols > P ? 1 : 0;
-    RTP_LLM_CHECK_WITH_INFO(draft_cols >= draft_offset + P, "MTP spec logits verify draft token columns mismatch");
+    const int64_t draft_offset = draft_cols == P + 1 ? 1 : 0;
+    RTP_LLM_CHECK_WITH_INFO(draft_cols == P || draft_cols == P + 1,
+                            "MTP spec logits verify draft token columns must be propose_step (%lld) "
+                            "or propose_step+1 (%lld), got %lld",
+                            static_cast<long long>(P),
+                            static_cast<long long>(P + 1),
+                            static_cast<long long>(draft_cols));
     auto draft     = draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
     auto dst       = draft_tokens_cpu_.narrow(0, 0, B).narrow(1, 0, P);
     auto draft_i32 = draft.scalar_type() == torch::kInt32 ? draft.contiguous() : draft.to(torch::kInt32).contiguous();
@@ -137,9 +155,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     const size_t B    = task.total_streams;
     const int    P    = task.propose_step;
     const size_t V    = task.vocab_size;
+    RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
     const size_t W    = SpecLogitsProcessor::bitmaskWordCount(V);
     const size_t rows = B * static_cast<size_t>(P + 1);
-    RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
 
     ensureBuffersFit(B, P, V, W);
     bool draft_tokens_materialized = false;
@@ -162,12 +180,12 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     auto                proc_mask = processor_bitmask_cpu_.narrow(0, 0, P + 1).narrow(1, 0, static_cast<int64_t>(W));
     std::vector<size_t> this_active_rows;
     this_active_rows.reserve(task.active.size());
-    bool applied_processor = false;
     for (const auto& item : task.active) {
-        if (!item.processor || !item.processor->isSpecVerifyEligible()) {
-            continue;
-        }
-        applied_processor = true;
+        RTP_LLM_CHECK_WITH_INFO(item.processor != nullptr, "MTP spec logits verify active processor is null");
+        RTP_LLM_CHECK_WITH_INFO(item.stream_idx < B,
+                                "MTP spec logits verify stream_idx=%zu out of range, total_streams=%zu",
+                                item.stream_idx,
+                                B);
         if (!draft_tokens_materialized) {
             materializeDraftTokensToCpu(task);
             draft_tokens_materialized = true;
@@ -188,7 +206,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), row_words);
         auto* cap_ptr            = spec_cap_cpu_.data_ptr<int32_t>();
         cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
-        this_active_rows.push_back(item.stream_idx);
+        appendUniqueRow(this_active_rows, item.stream_idx);
     }
 
     auto upload_row_bool = [&](size_t stream_row) {
@@ -200,15 +218,6 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         auto gpu_slice = disallow_mask_gpu_.narrow(0, row_begin, P + 1).narrow(1, 0, V);
         gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
     };
-
-    if (!applied_processor) {
-        // Sync prev-call rows back to GPU allow-all (false) before bailing.
-        last_active_stream_rows_.clear();
-        for (size_t row : rows_to_reset) {
-            upload_row_bool(row);
-        }
-        return {};
-    }
 
     auto mask_gpu = disallow_mask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(V));
     auto cap_cpu  = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
@@ -223,9 +232,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
 
     result.spec_vocab_mask_gpu  = mask_gpu;
     result.has_active_processor = true;
-    result.spec_vocab_mask_cpu_owner =
+    result.spec_vocab_mask_cpu_lifetime =
         disallow_mask_cpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(V));
-    result.spec_cap_cpu_owner = cap_cpu;
+    result.spec_cap_cpu = cap_cpu;
     return result;
 }
 

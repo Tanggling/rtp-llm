@@ -553,12 +553,12 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
     auto                   result = runner.buildInline(task);
 
     ASSERT_TRUE(result.has_active_processor);
-    ASSERT_TRUE(result.spec_vocab_mask_cpu_owner.defined());
+    ASSERT_TRUE(result.spec_vocab_mask_cpu_lifetime.defined());
     EXPECT_EQ(proc_a->observed_draft_tokens, (std::vector<int32_t>{11, 12}));
     EXPECT_EQ(proc_c->observed_draft_tokens, (std::vector<int32_t>{21, 22}));
-    EXPECT_EQ(toVec<int32_t>(result.spec_cap_cpu_owner), (std::vector<int32_t>{1, propose_step}));
+    EXPECT_EQ(toVec<int32_t>(result.spec_cap_cpu), (std::vector<int32_t>{1, propose_step}));
 
-    const auto& mask = result.spec_vocab_mask_cpu_owner;
+    const auto& mask = result.spec_vocab_mask_cpu_lifetime;
     EXPECT_FALSE(specMaskAllows(mask, 0, 1));
     EXPECT_TRUE(specMaskAllows(mask, 0, 2));
     EXPECT_FALSE(specMaskAllows(mask, 0, 3));
@@ -571,6 +571,25 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
     EXPECT_FALSE(specMaskAllows(mask, 3, 1));
     EXPECT_TRUE(specMaskAllows(mask, 4, 1));
     EXPECT_TRUE(specMaskAllows(mask, 5, 2));
+}
+
+TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerRejectsUnexpectedDraftColumns) {
+    const size_t batch_size   = 1;
+    const int    propose_step = 2;
+    const size_t vocab_size   = 8;
+
+    auto proc = std::make_shared<FakeGrammarSpecLogitsProcessor>(
+        std::vector<std::vector<int32_t>>{{1}, {2}, {3}}, /*cap=*/propose_step);
+
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = batch_size;
+    task.propose_step  = propose_step;
+    task.vocab_size    = vocab_size;
+    task.draft_tokens  = torch::tensor({11, 12, 13, 14}, torch::kInt32).reshape({1, 4});
+    task.active        = {{proc, 0}};
+
+    SpecLogitsVerifyRunner runner;
+    EXPECT_THROW((void)runner.buildInline(task), std::runtime_error);
 }
 
 TEST_F(MtpExecutorTest, testPrepareStreamsRejectsNormalDecodeOnlyProcessor) {
