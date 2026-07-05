@@ -57,6 +57,7 @@ cc_library(
         "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
         "logits_processor/GrammarLogitsProcessor.h",
+        "logits_processor/GrammarSpecVerify.h",
         "logits_processor/SpecLogitsVerifyRunner.h",
         "logits_processor/BitmaskUtils.h",
     ],
@@ -69,6 +70,7 @@ cc_library(
         "logits_processor/RecommendationLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
         "logits_processor/GrammarLogitsProcessor.cc",
+        "logits_processor/GrammarSpecVerify.cc",
         "logits_processor/SpecLogitsVerifyRunner.cc",
     ],
     deps = [

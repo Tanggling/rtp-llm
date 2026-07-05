@@ -108,14 +108,6 @@ bool hasMtpIncompatibleProcessor(const GenerateStreamPtr& stream) {
     });
 }
 
-bool needPrefillPhase(RoleType role_type) {
-    return role_type == RoleType::PREFILL || role_type == RoleType::PDFUSION;
-}
-
-bool needDecodePhase(RoleType role_type) {
-    return role_type == RoleType::DECODE || role_type == RoleType::PDFUSION;
-}
-
 }  // namespace
 
 bool MtpExecutor::isTpRank0() const {
@@ -761,7 +753,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         } else {
             draft_tokens = draft_token_ids_t;
         }
-        spec_logits_result = buildSpecLogitsVerifyInline(streams, draft_tokens);
+        spec_logits_result = runSpecLogitsVerify(streams, draft_tokens);
     }
 
     // eplb
@@ -934,11 +926,11 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     // step forward
     int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
-    if (needPrefillPhase(role_type_)) {
+    if (role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION) {
         THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector));
     }
 
-    if (needDecodePhase(role_type_)) {
+    if (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) {
         // decodeStep handles the empty-batch control path: TP non-root ranks
         // rely on its skip_run broadcast to keep collectives matched.
         THROW_IF_STATUS_ERROR(decodeStep(decode_streams, metrics_collector));
@@ -1080,8 +1072,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 }
 
 SpecLogitsVerifyRunner::LaunchResult
-MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
-                                         const torch::Tensor&                draft_tokens) {
+MtpExecutor::runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams, const torch::Tensor& draft_tokens) {
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams = streams.size();
     task.propose_step  = static_cast<int>(propose_step_);

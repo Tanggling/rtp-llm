@@ -39,8 +39,8 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const TokenizerInfo& to
         XGrammarBackendOptions opts = backendOptionsFromConfig(cfg);
         auto typed_info = std::static_pointer_cast<const xgrammar::TokenizerInfo>(tokenizer_info.direct_info_);
         auto backend    = std::make_shared<XGrammarBackend>(*typed_info, opts);
-        RTP_LLM_LOG_INFO("XGrammarBackend::create: using direct TokenizerInfo");
-        RTP_LLM_LOG_INFO("XGrammarBackend::create: ready (override_stop_tokens=%zu, threads=%d)",
+        RTP_LLM_LOG_INFO("XGrammarBackend::create: ready with direct TokenizerInfo "
+                         "(override_stop_tokens=%zu, threads=%d)",
                          cfg.override_stop_tokens.size(),
                          opts.max_compiler_threads);
         return backend;

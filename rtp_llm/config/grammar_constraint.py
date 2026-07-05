@@ -1,26 +1,22 @@
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
-GrammarFieldName = Literal["json_schema", "regex", "ebnf", "structural_tag"]
-GrammarValue = Union[str, Dict[str, Any]]
-
-GRAMMAR_FIELD_NAMES: Tuple[GrammarFieldName, ...] = (
+GRAMMAR_FIELD_NAMES = (
     "json_schema",
     "regex",
     "ebnf",
     "structural_tag",
 )
-COMPACT_JSON_SEPARATORS = (",", ":")
 
 
 def dump_compact_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def load_json_field(name: str, value: GrammarValue) -> Any:
+def load_json_field(name: str, value: Any) -> Any:
     if isinstance(value, dict):
         return value
     try:
@@ -32,9 +28,7 @@ def load_json_field(name: str, value: GrammarValue) -> Any:
         )
 
 
-def normalize_grammar_value(
-    name: GrammarFieldName, value: GrammarValue
-) -> GrammarValue:
+def normalize_grammar_value(name: str, value: Any) -> Any:
     if name in ("json_schema", "structural_tag") and isinstance(value, dict):
         return dump_compact_json(value)
     return value
@@ -57,8 +51,8 @@ def has_bounded_region(node: Any) -> bool:
 class GrammarConstraint:
     """Canonical one-of grammar constraint before it is written to GenerateConfig fields."""
 
-    name: GrammarFieldName
-    value: GrammarValue
+    name: str
+    value: Any
 
     @classmethod
     def from_response_format(
@@ -102,8 +96,8 @@ class GrammarConstraint:
                 f"{self.name} must not be empty",
             )
 
-    def as_config_update(self) -> Dict[GrammarFieldName, Optional[GrammarValue]]:
-        values: Dict[GrammarFieldName, Optional[GrammarValue]] = {
+    def as_config_update(self) -> Dict[str, Any]:
+        values: Dict[str, Any] = {
             "json_schema": None,
             "regex": None,
             "ebnf": None,

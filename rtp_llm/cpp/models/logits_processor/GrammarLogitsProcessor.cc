@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 
 #include <algorithm>
-#include <exception>
 #include <optional>
 #include <utility>
 
@@ -13,185 +12,11 @@
 #endif
 
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarSpecVerify.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
-
-namespace {
-
-class GrammarSpecVerifier final {
-public:
-    GrammarSpecVerifier(GrammarMatcher& matcher, int64_t eos_token_id):
-        matcher_(matcher), eos_token_id_(eos_token_id) {}
-
-    static ErrorInfo preflightRequest(const SpecLogitsProcessorRequest& request) {
-        if (request.bitmask_size_int32 < SpecLogitsProcessor::bitmaskWordCount(request.vocab_size)) {
-            return ErrorInfo(ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL,
-                             "grammar MTP verify: bitmask buffer smaller than model vocab (words="
-                                 + std::to_string(request.bitmask_size_int32)
-                                 + ", vocab=" + std::to_string(request.vocab_size) + ")");
-        }
-        return {};
-    }
-
-    int run(const SpecLogitsProcessorRequest& request, ErrorInfo& out_err) {
-        if (auto err = validateMatcherInvariants(request); err.hasError()) {
-            out_err = err;
-            return 0;
-        }
-
-        const int  P = request.propose_step;
-        const auto W = request.bitmask_size_int32;
-
-        return runGuarded(
-            request.bitmask_cpu_out,
-            W,
-            "grammar",
-            [&](int& accepted_prefix, ErrorInfo& /*walk_err*/) -> int {
-                int cap = P;
-                for (int offset = 0; offset <= P; ++offset) {
-                    int32_t* row       = request.bitmask_cpu_out + offset * W;
-                    RowState row_state = fillGrammarRow(row, W, request.vocab_size);
-                    if (offset == P) {
-                        break;
-                    }
-                    if (row_state == RowState::Terminated || row_state == RowState::Finished
-                        || row_state == RowState::Failed) {
-                        cap = offset;
-                        break;
-                    }
-
-                    const int32_t draft_token = request.draft_tokens[offset];
-                    if (draft_token < 0 || static_cast<size_t>(draft_token) >= request.vocab_size
-                        || !bitmaskAllowsToken(row, W, draft_token)) {
-                        cap = offset;
-                        break;
-                    }
-                    if (!matcher_.acceptToken(draft_token)) {
-                        cap = offset;
-                        break;
-                    }
-                    ++accepted_prefix;
-                }
-                return cap;
-            },
-            out_err);
-    }
-
-private:
-    enum class RowState {
-        Active,
-        Finished,
-        Terminated,
-        Failed,
-    };
-
-    ErrorInfo validateMatcherInvariants(const SpecLogitsProcessorRequest& request) {
-        const auto W = request.bitmask_size_int32;
-
-        const int32_t grammar_vocab_size = matcher_.vocabSize();
-        if (grammar_vocab_size <= 0) {
-            matcher_.markFinished();
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             "grammar MTP verify: invalid grammar vocab size " + std::to_string(grammar_vocab_size));
-        }
-        if (SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size) > W) {
-            matcher_.markFinished();
-            return ErrorInfo(ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB,
-                             "grammar vocab exceeds model vocab in MTP verify (grammar="
-                                 + std::to_string(grammar_vocab_size) + ", model_words=" + std::to_string(W) + ")");
-        }
-
-        auto token_in_range = [W](int64_t t) { return t >= 0 && static_cast<size_t>(t / 32) < W; };
-        if (!token_in_range(eos_token_id_)) {
-            matcher_.markFinished();
-            return ErrorInfo(ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB,
-                             "grammar MTP verify: eos_token_id (" + std::to_string(eos_token_id_)
-                                 + ") out of model vocab bitmask (words=" + std::to_string(W) + ")");
-        }
-        return {};
-    }
-
-    RowState fillGrammarRow(int32_t* row, size_t W, size_t model_vocab_size) {
-        std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
-        if (matcher_.finished()) {
-            forceTokenInBitmask(row, W, eos_token_id_);
-            return RowState::Finished;
-        }
-        if (matcher_.isTerminated()) {
-            forceTokenInBitmask(row, W, eos_token_id_);
-            return RowState::Terminated;
-        }
-
-        const int32_t grammar_vocab_size = matcher_.vocabSize();
-        const size_t  grammar_words      = SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size);
-
-        int64_t  dl_shape[2];
-        DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(grammar_words), dl_shape);
-        if (!matcher_.fillBitmask(&dl, 0)) {
-            matcher_.markFinished();
-            forceTokenInBitmask(row, W, eos_token_id_);
-            return RowState::Failed;
-        }
-        clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(model_vocab_size));
-        return RowState::Active;
-    }
-
-    template<typename Walk>
-    int runGuarded(int32_t* bitmask_cpu_out, size_t W, const char* who, Walk&& walk, ErrorInfo& out_err) {
-        int         grammar_accepted_prefix = 0;
-        int         cap                     = 0;
-        ErrorInfo   walk_err;
-        std::string verify_exception_what;
-
-        auto rollback_provisional = [&]() {
-            try {
-                if (grammar_accepted_prefix > 0) {
-                    matcher_.rollback(grammar_accepted_prefix);
-                }
-            } catch (const std::exception& e) {
-                matcher_.markFinished();
-                if (verify_exception_what.empty()) {
-                    verify_exception_what = std::string("rollback: ") + e.what();
-                }
-            } catch (...) {
-                matcher_.markFinished();
-                if (verify_exception_what.empty()) {
-                    verify_exception_what = "rollback: unknown";
-                }
-            }
-        };
-
-        try {
-            cap = walk(grammar_accepted_prefix, walk_err);
-        } catch (const std::exception& e) {
-            verify_exception_what = e.what();
-        } catch (...) {
-            verify_exception_what = "unknown";
-        }
-
-        rollback_provisional();
-
-        if (!verify_exception_what.empty()) {
-            matcher_.markFinished();
-            forceTokenInBitmask(bitmask_cpu_out, W, eos_token_id_);
-            out_err = ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION,
-                                std::string(who) + " MTP verify exception: " + verify_exception_what);
-            return 0;
-        }
-        if (walk_err.hasError()) {
-            out_err = walk_err;
-            return 0;
-        }
-        return cap;
-    }
-
-    GrammarMatcher& matcher_;
-    int64_t         eos_token_id_ = 0;
-};
-
-}  // namespace
 
 class GrammarLogitsProcessor::DecodeMaskBuilder final {
 public:
@@ -461,17 +286,12 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
     if (!matcher_ || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
         return static_cast<int>(request.propose_step);
     }
-    if (auto err = GrammarSpecVerifier::preflightRequest(request); err.hasError()) {
-        setError(err);
-        return 0;
-    }
 
     ErrorInfo local_err;
     int       cap_out = 0;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        GrammarSpecVerifier         verifier(*matcher_, eos_token_id_);
-        cap_out = verifier.run(request, local_err);
+        cap_out = grammar_spec_verify::verify(*matcher_, eos_token_id_, request, local_err);
     }
     if (local_err.hasError()) {
         setError(local_err);

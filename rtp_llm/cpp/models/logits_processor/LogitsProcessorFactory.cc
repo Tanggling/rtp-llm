@@ -55,18 +55,6 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
 // failure returns a non-ok ErrorResult with a user-facing grammar error.
 ErrorResult<std::shared_ptr<GrammarMatcher>>
 compileMatcherFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool terminate_without_stop_token) {
-    // Lightweight size caps (xgrammar already validates schema/regex content).
-    constexpr size_t kMaxJsonSchemaSize = 1024 * 1024;  // 1 MiB
-    constexpr size_t kMaxRegexEbnfSize  = 64 * 1024;    // 64 KiB
-    const size_t     limit =
-        (key.key_type == "json" || key.key_type == "structural_tag") ? kMaxJsonSchemaSize : kMaxRegexEbnfSize;
-    if (key.key_string.size() > limit) {
-        const std::string detail =
-            key.key_type + " grammar exceeds maximum size limit (" + std::to_string(limit) + " bytes)";
-        // Don't cache rejection: distinct huge blobs would inflate memory before LRU evicts.
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + detail);
-    }
-
     CompileResult result = backend.getOrCompile(key);
     if (!result.compiled) {
         const std::string err = result.error_message.empty() ? "unknown compile error" : result.error_message;

@@ -103,8 +103,8 @@ protected:
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t);
 
-    SpecLogitsVerifyRunner::LaunchResult buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
-                                                                     const torch::Tensor&                draft_tokens);
+    SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams,
+                                                             const torch::Tensor&                draft_tokens);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,

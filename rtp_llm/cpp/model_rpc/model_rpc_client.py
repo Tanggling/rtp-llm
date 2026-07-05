@@ -487,17 +487,14 @@ class ModelRpcClient(object):
         if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
         ):
-            # Unknown C++ codes degrade to UNKNOWN_ERROR rather than masking the real failure with ValueError.
-            try:
-                exc_type = ExceptionType(error_details.error_code)
-            except ValueError:
-                exc_type = ExceptionType.UNKNOWN_ERROR
             logging.error(
                 f"{request_desc} RPC failed: "
                 f"{e.code()}, {e.details()}, detail error code is "
-                f"{exc_type.name}({error_details.error_code})"
+                f"{ExceptionType.from_value(error_details.error_code)}"
             )
-            raise FtRuntimeException(exc_type, error_details.error_message)
+            raise FtRuntimeException(
+                ExceptionType(error_details.error_code), error_details.error_message
+            )
         else:
             logging.error(
                 f"{request_desc} RPC failed: "
