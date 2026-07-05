@@ -372,9 +372,7 @@ class CustomChatRenderer:
         )
 
     def get_reasoning_format(self) -> ReasoningFormat:
-        return ReasoningFormat.from_model_type_and_env_config(
-            self.model_type, self.generate_env_config
-        )
+        return ReasoningFormat.from_generate_env_config(self.generate_env_config)
 
     def add_extra_stop_words(self, extra_stop_words: List[str]):
         self.extra_stop_words.extend(extra_stop_words)

@@ -95,7 +95,6 @@ class GenerateConfig(BaseModel):
     )
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     end_think_token_ids: List[int] = []
-    begin_think_token_ids: List[int] = []
     num_beams: int = 1
     variable_num_beams: List[int] = []
     do_sample: bool = True

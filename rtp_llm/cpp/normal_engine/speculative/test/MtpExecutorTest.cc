@@ -296,6 +296,25 @@ private:
     int                               cap_;
 };
 
+class FakeNormalDecodeOnlyProcessor: public BaseLogitsProcessor {
+public:
+    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {}
+
+    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override {}
+
+    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {}
+
+    ScoreBatchRole scoreBatchRole() const override {
+        return ScoreBatchRole::kNormalDecodeOnly;
+    }
+};
+
+class TestableMtpExecutor: public MtpExecutor {
+public:
+    using MtpExecutor::MtpExecutor;
+    using MtpExecutor::prepareStreams;
+};
+
 struct MtpExecutorComponents {
     std::unique_ptr<MtpExecutor>            executor;
     std::unique_ptr<FakeModel>              fake_target_model;
@@ -441,7 +460,7 @@ public:
         cache_manager->init();
 
         // Create MtpExecutor
-        auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager);
+        auto executor = std::make_unique<TestableMtpExecutor>(params, propose_params, cache_manager);
 
         // Create fake models
         GptModelInitParams target_model_params(
@@ -552,6 +571,34 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
     EXPECT_FALSE(specMaskAllows(mask, 3, 1));
     EXPECT_TRUE(specMaskAllows(mask, 4, 1));
     EXPECT_TRUE(specMaskAllows(mask, 5, 2));
+}
+
+TEST_F(MtpExecutorTest, testPrepareStreamsRejectsNormalDecodeOnlyProcessor) {
+    MtpExecutorTestConfig test_config;
+    auto                  components = createMtpExecutorComponents(test_config);
+
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}});
+    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    GenerateStreamPtr    stream = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
+    stream->logits_processor_list_.push_back(std::make_shared<FakeNormalDecodeOnlyProcessor>());
+
+    std::list<GenerateStreamPtr> prefill_streams;
+    std::list<GenerateStreamPtr> decode_streams;
+    EXPECT_FALSE(stream->hasError());
+
+    static_cast<TestableMtpExecutor*>(components.executor.get())
+        ->prepareStreams(std::list<GenerateStreamPtr>{stream}, prefill_streams, decode_streams);
+
+    EXPECT_TRUE(prefill_streams.empty());
+    EXPECT_TRUE(decode_streams.empty());
+    ASSERT_TRUE(stream->hasError());
+    auto error = stream->statusInfo();
+    EXPECT_EQ(error.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(error.ToString().find("normal-decode-only logits processor"),
+              std::string::npos);
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {

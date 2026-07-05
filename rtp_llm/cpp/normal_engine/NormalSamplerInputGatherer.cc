@@ -198,23 +198,22 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
     }
 }
 
-void NormalSamplerInputGatherer::insertProcessorState(LogitsProcessorStatesPtr&                    state_ptr,
+void NormalSamplerInputGatherer::insertProcessorState(LogitsProcessorStatesPtr&                   state_ptr,
                                                       const std::shared_ptr<BaseLogitsProcessor>& processor,
-                                                      GenerateStreamPtr&                           stream,
-                                                      size_t                                       idx,
-                                                      int                                          score_len) {
+                                                      GenerateStreamPtr&                          stream,
+                                                      size_t                                      idx,
+                                                      int                                         score_len) {
     switch (processor->scoreBatchRole()) {
-        case ScoreBatchRole::kStatelessProcess:
+        case ScoreBatchRole::kScoreBatchProcess:
             for (int i = 0; i < score_len; ++i) {
                 state_ptr->insert(processor, idx + i, idx + i + 1);
             }
             break;
         case ScoreBatchRole::kSpecVerify:
             break;
-        case ScoreBatchRole::kIncompatible:
+        case ScoreBatchRole::kNormalDecodeOnly:
             stream->reportError(ErrorCode::INVALID_PARAMS,
-                                "stateful logits processor lacks spec-verify coverage in "
-                                "score_batch decoding");
+                                "normal-decode-only logits processor cannot run in score_batch decoding");
             break;
     }
 }

@@ -32,49 +32,6 @@ class ReasoningFormat:
             return cls(tag_end={"type": "token", "token": int(token_id)})
         return cls(tag_end=tag)
 
-    @classmethod
-    def from_model_type(cls, model_type: Optional[str]) -> Optional["ReasoningFormat"]:
-        if not model_type:
-            return None
-        normalized = model_type.lower().replace("-", "_")
-        if normalized in {
-            "qwen_3",
-            "qwen_3_moe",
-            "qwen_3_tool",
-            "qwen_tool",
-            "qwen3_next",
-            "qwen35_moe",
-            "qwen35_dense",
-            "qwen35_moe_mtp",
-            "qwen3_coder_moe",
-        }:
-            return cls(tag_end="</think>", suffix="\n\n")
-        if normalized in {
-            "deepseek_r1",
-            "deepseek_v31",
-            "deepseek_v3_1",
-            "deepseek_v32",
-            "deepseek_v3_2",
-            "deepseek_v4",
-            "kimi_k2",
-            "kimi_linear",
-            "kimi_k25",
-        }:
-            return cls(tag_end="</think>")
-        return None
-
-    @classmethod
-    def from_model_type_and_env_config(
-        cls, model_type: Optional[str], generate_env_config: Any
-    ) -> "ReasoningFormat":
-        env_format = cls.from_generate_env_config(generate_env_config)
-        if env_format.token_end_id() is not None:
-            return env_format
-        env_stop_text = env_format.stop_text()
-        if env_stop_text and env_stop_text != DEFAULT_THINK_END_TAG:
-            return env_format
-        return cls.from_model_type(model_type) or env_format
-
     def token_end_id(self) -> Optional[int]:
         if not isinstance(self.tag_end, dict):
             return None

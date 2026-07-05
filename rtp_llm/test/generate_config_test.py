@@ -644,16 +644,13 @@ class ResponseFormatProjectionTest(TestCase):
         cfg: GenerateConfig,
         think_end_tag: str = "</think>\n\n",
         think_end_token_id: int = -1,
-        model_type: Optional[str] = None,
     ):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = think_end_token_id
         generate_env_config.think_end_tag = think_end_tag
         cfg.add_thinking_params(None, generate_env_config)
-        return ReasoningFormat.from_model_type_and_env_config(
-            model_type, generate_env_config
-        )
+        return ReasoningFormat.from_generate_env_config(generate_env_config)
 
     def test_builder_projects_response_format(self):
         cfg = GenerateConfig(response_format={"type": "json_object"})
@@ -792,44 +789,12 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertEqual(elements[0]["end"], {"type": "token", "token": 123})
         self.assertTrue(self._terminate_without_stop_token(cfg))
 
-    def test_reasoning_qwen35_profile_splits_think_suffix(self):
-        cfg = GenerateConfig(
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"schema": {"type": "object"}},
-            },
-            max_thinking_tokens=16,
-        )
-        reasoning_format = self._enable_thinking(cfg, model_type="qwen35_moe")
-        self._validate(cfg, reasoning_format=reasoning_format)
-
-        structural_tag = json.loads(cfg.structural_tag)
-        elements = structural_tag["format"]["elements"]
-        self.assertEqual(elements[0]["end"], "</think>")
-        self.assertEqual(elements[1], {"type": "const_string", "value": "\n\n"})
-        self.assertEqual(elements[2]["type"], "json_schema")
-
-    def test_reasoning_deepseek_v4_profile_uses_plain_think_end(self):
+    def test_reasoning_uses_explicit_env_tag(self):
         cfg = GenerateConfig(
             response_format={"type": "regex", "pattern": r"\d+"},
             max_thinking_tokens=16,
         )
-        reasoning_format = self._enable_thinking(cfg, model_type="deepseek_v4")
-        self._validate(cfg, reasoning_format=reasoning_format)
-
-        structural_tag = json.loads(cfg.structural_tag)
-        elements = structural_tag["format"]["elements"]
-        self.assertEqual(elements[0]["end"], "</think>")
-        self.assertEqual(elements[1], {"type": "regex", "pattern": r"\d+"})
-
-    def test_reasoning_explicit_env_tag_overrides_model_profile(self):
-        cfg = GenerateConfig(
-            response_format={"type": "regex", "pattern": r"\d+"},
-            max_thinking_tokens=16,
-        )
-        reasoning_format = self._enable_thinking(
-            cfg, think_end_tag="</think>\n", model_type="qwen35_moe"
-        )
+        reasoning_format = self._enable_thinking(cfg, think_end_tag="</think>\n")
         self._validate(cfg, reasoning_format=reasoning_format)
 
         structural_tag = json.loads(cfg.structural_tag)

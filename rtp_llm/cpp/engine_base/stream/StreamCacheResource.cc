@@ -129,8 +129,9 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     // Apply side-channel data to GenerateStream. Must use updateWithoutLock:
     // moveToNext already holds mutex_ when it reaches us via handleLoading.
     //
-    // Use `>= 0`: id 0 is a legitimate model token (BOS/PAD collisions).
-    if (payload->first_token_id >= 0) {
+    // Preserve the existing sentinel behavior: first_token_id <= 0 means no
+    // committed first token is available in the side-channel payload.
+    if (payload->first_token_id > 0) {
         stream->setIsContextStream(false);
         stream->step();
         stream->incLastOutputPos();

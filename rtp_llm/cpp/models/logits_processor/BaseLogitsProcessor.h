@@ -12,9 +12,9 @@
 namespace rtp_llm {
 
 enum class ScoreBatchRole {
-    kStatelessProcess,  // process() expanded per score_batch row
-    kSpecVerify,        // mask via spec verify; skip gatherer process() path
-    kIncompatible,      // stateful without spec-verify coverage
+    kNormalDecodeOnly,   // process() is only defined for normal one-step decode.
+    kScoreBatchProcess,  // process() can be expanded per score_batch row.
+    kSpecVerify,         // mask via spec verify; skip gatherer process() path.
 };
 
 class BaseLogitsProcessor {
@@ -31,7 +31,7 @@ public:
         return false;
     }
     virtual ScoreBatchRole scoreBatchRole() const {
-        return isStateful() ? ScoreBatchRole::kIncompatible : ScoreBatchRole::kStatelessProcess;
+        return ScoreBatchRole::kScoreBatchProcess;
     }
     // Number of committed *output* tokens from this processor's point of view.
     // MUST stay aligned with GenerateStream::outputTokenLen() (seqLength - inputLength);

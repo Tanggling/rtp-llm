@@ -98,6 +98,16 @@ void applySpecLogitsCap(const SpecLogitsVerifyRunner::LaunchResult& spec_logits_
     }
 }
 
+bool hasMtpIncompatibleProcessor(const GenerateStreamPtr& stream) {
+    if (!stream) {
+        return false;
+    }
+    const auto& processors = stream->getAllLogitsProcessorPtr();
+    return std::any_of(processors.begin(), processors.end(), [](const auto& processor) {
+        return processor && processor->scoreBatchRole() == ScoreBatchRole::kNormalDecodeOnly;
+    });
+}
+
 }  // namespace
 
 bool MtpExecutor::isTpRank0() const {
@@ -873,6 +883,13 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         if (stream->isContextStream()) {
             prefill_streams.push_back(stream);
         } else {
+            if (hasMtpIncompatibleProcessor(stream)) {
+                stream->reportError(ErrorCode::INVALID_PARAMS,
+                                    "MTP decode requires score-batch/spec-verify capable logits processors; "
+                                    "found normal-decode-only logits processor; disable MTP or disable the "
+                                    "incompatible logits processor");
+                continue;
+            }
             stream->setScoreLen(propose_step_ + 1);
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
                 auto sp_output_buffer = makeFakeSPOutputBuffer(data_type_, hidden_size_, vocab_size_, propose_step_);
@@ -904,7 +921,6 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
 
-    // prepare streams
     prepareStreams(streams, prefill_streams, decode_streams);
 
     // step forward
@@ -914,7 +930,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
         THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector));
     }
 
-    if (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) {
+    if ((role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) && !decode_streams.empty()) {
         THROW_IF_STATUS_ERROR(decodeStep(decode_streams, metrics_collector));
     }
 
