@@ -177,10 +177,6 @@ GrammarLogitsProcessor::buildDeviceMaskStateLocked(const c10::Device& device, Er
         state.mode = DeviceMaskMode::TERMINATED;
         return state;
     }
-    if (matcher_->isPassthroughForMask()) {
-        state.mode = DeviceMaskMode::PASSTHROUGH;
-        return state;
-    }
 
     const int32_t grammar_vocab_size = matcher_->vocabSize();
     if (grammar_vocab_size <= 0) {
@@ -249,9 +245,6 @@ void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, c
         case DeviceMaskMode::NOOP:
         case DeviceMaskMode::FINISHED:
             return;
-        case DeviceMaskMode::PASSTHROUGH:
-            maskToken(logits, eos_token_id_);
-            return;
         case DeviceMaskMode::TERMINATED:
             forceToken(logits, eos_token_id_);
             return;
@@ -288,13 +281,6 @@ void GrammarLogitsProcessor::forceToken(const torch::Tensor& logits, int64_t tok
     }
     logits.fill_(BaseLogitsProcessor::neg_inf);
     logits[token_id] = 0.0f;
-}
-
-void GrammarLogitsProcessor::maskToken(const torch::Tensor& logits, int64_t token_id) {
-    if (token_id < 0 || token_id >= logits.size(0)) {
-        return;
-    }
-    logits[token_id] = BaseLogitsProcessor::neg_inf;
 }
 
 void GrammarLogitsProcessor::applyMaskLocked(const torch::Tensor& logits, ErrorInfo& out_err) {
@@ -396,10 +382,6 @@ GrammarLogitsProcessor::fillGrammarRowLocked(int32_t* row, size_t W, size_t mode
     if (matcher_->isTerminated()) {
         forceTokenInBitmask(row, W, eos_token_id_);
         return RowState::Terminated;
-    }
-    if (matcher_->isPassthroughForMask()) {
-        clearTokenFromBitmask(row, W, eos_token_id_);
-        return RowState::Active;
     }
 
     const int32_t grammar_vocab_size = matcher_->vocabSize();

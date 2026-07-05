@@ -2,12 +2,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <optional>
 #include <utility>
-#include <variant>
-
-#include <xgrammar/exception.h>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
@@ -38,9 +36,10 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const TokenizerInfo& to
             RTP_LLM_LOG_INFO("XGrammarBackend::create: structured output disabled (TokenizerInfo empty)");
             return nullptr;
         }
-        const std::string&     opaque  = TokenizerInfo::BackendAccess::opaque(tokenizer_info);
-        XGrammarBackendOptions opts    = backendOptionsFromConfig(cfg);
-        auto                   backend = std::make_shared<XGrammarBackend>(opaque, opts);
+        XGrammarBackendOptions opts = backendOptionsFromConfig(cfg);
+        auto typed_info = std::static_pointer_cast<const xgrammar::TokenizerInfo>(tokenizer_info.direct_info_);
+        auto backend    = std::make_shared<XGrammarBackend>(*typed_info, opts);
+        RTP_LLM_LOG_INFO("XGrammarBackend::create: using direct TokenizerInfo");
         RTP_LLM_LOG_INFO("XGrammarBackend::create: ready (override_stop_tokens=%zu, threads=%d)",
                          cfg.override_stop_tokens.size(),
                          opts.max_compiler_threads);
@@ -51,17 +50,9 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const TokenizerInfo& to
     }
 }
 
-XGrammarBackend::XGrammarBackend(const std::string& tokenizer_info_json, const XGrammarBackendOptions& options):
+XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info, const XGrammarBackendOptions& options):
     options_(options),
-    tokenizer_info_([&] {
-        auto result = xgrammar::TokenizerInfo::DeserializeJSON(tokenizer_info_json);
-        if (std::holds_alternative<xgrammar::TokenizerInfo>(result)) {
-            return std::get<xgrammar::TokenizerInfo>(std::move(result));
-        }
-        std::string msg;
-        std::visit([&msg](const auto& err) { msg = err.what(); }, std::get<1>(result));
-        throw std::runtime_error(std::string("XGrammarBackend: failed to deserialize TokenizerInfo: ") + msg);
-    }()),
+    tokenizer_info_(tokenizer_info),
     compiler_(tokenizer_info_,
               std::max(1, options.max_compiler_threads),
               /*enable_cache=*/true,
@@ -152,21 +143,14 @@ CompileResult XGrammarBackend::getOrCompile(const GrammarKeyCpp& key) {
         result.is_invalid    = false;
         result.error_message = std::string("getOrCompile: unexpected throw: ") + e.what();
         return result;
-    } catch (...) {
-        CompileResult result;
-        result.compiled      = nullptr;
-        result.is_invalid    = false;
-        result.error_message = "getOrCompile: unknown throw";
-        return result;
     }
 }
 
 std::shared_ptr<RtpGrammarMatcher> XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                                                   bool terminate_without_stop_token) {
     RTP_LLM_CHECK_WITH_INFO(compiled != nullptr, "createMatcher requires a non-null CompiledGrammar");
-    return std::make_shared<RtpGrammarMatcher>(std::move(compiled),
-                                               options_.override_stop_tokens,
-                                               terminate_without_stop_token);
+    return std::make_shared<RtpGrammarMatcher>(
+        std::move(compiled), options_.override_stop_tokens, terminate_without_stop_token);
 }
 
 void XGrammarBackend::clear() {

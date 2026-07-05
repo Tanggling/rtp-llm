@@ -1,13 +1,15 @@
 #pragma once
 
-#include <string>
+#include <memory>
+#include <utility>
 
 namespace rtp_llm {
 
 class ModelConfig;
+class XGrammarBackend;
 
-// Opaque cooked tokenizer-info blob; backend-private representation, only
-// reachable through BackendAccess.
+// Runtime tokenizer-info handle. Keeps xgrammar's constructor-built derived
+// indexes alive without exposing xgrammar symbols from this public API.
 class TokenizerInfo {
 public:
     TokenizerInfo() = default;
@@ -16,27 +18,15 @@ public:
     // model_vocab_size (model_config.vocab_size) widens the grammar vocab over a padded model vocab.
     static TokenizerInfo fromHuggingFaceTokenizer(const ModelConfig& model_config) noexcept;
 
-    // For tests and future disk-cache rehydration.
-    static TokenizerInfo fromOpaque(std::string opaque);
-
     bool empty() const noexcept {
-        return opaque_.empty();
+        return !direct_info_;
     }
-
-    // Backend-only accessor for the opaque blob (review-enforced, no friend isolation).
-    class BackendAccess;
 
 private:
-    explicit TokenizerInfo(std::string opaque): opaque_(std::move(opaque)) {}
-    std::string opaque_;
-    friend class BackendAccess;
-};
+    explicit TokenizerInfo(std::shared_ptr<const void> direct_info): direct_info_(std::move(direct_info)) {}
 
-class TokenizerInfo::BackendAccess {
-public:
-    static const std::string& opaque(const TokenizerInfo& info) {
-        return info.opaque_;
-    }
+    std::shared_ptr<const void> direct_info_;
+    friend class XGrammarBackend;
 };
 
 }  // namespace rtp_llm

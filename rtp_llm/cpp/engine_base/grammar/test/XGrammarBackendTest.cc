@@ -17,35 +17,34 @@ namespace rtp_llm {
 namespace {
 
 // 128-char ASCII fixture vocab — enough to construct TokenizerInfo + trie.
-std::string makeTokenizerInfoJson() {
+xgrammar::TokenizerInfo makeTokenizerInfo() {
     std::vector<std::string> vocab;
     vocab.reserve(128);
     for (int i = 0; i < 128; ++i) {
         vocab.emplace_back(1, static_cast<char>(i));
     }
-    xgrammar::TokenizerInfo info(vocab,
-                                 xgrammar::VocabType::RAW,
-                                 /*vocab_size=*/128,
-                                 /*stop_token_ids=*/std::vector<int32_t>{0});
-    return info.SerializeJSON();
+    return xgrammar::TokenizerInfo(vocab,
+                                   xgrammar::VocabType::RAW,
+                                   /*vocab_size=*/128,
+                                   /*stop_token_ids=*/std::vector<int32_t>{0});
 }
 
 XGrammarBackendOptions defaultOptions() {
     XGrammarBackendOptions opts;
-    opts.any_whitespace            = true;
-    opts.strict_mode               = true;
-    opts.max_compiler_threads      = 2;
-    opts.compiler_cache_bytes      = -1;
+    opts.any_whitespace       = true;
+    opts.strict_mode          = true;
+    opts.max_compiler_threads = 2;
+    opts.compiler_cache_bytes = -1;
     return opts;
 }
 
-TEST(XGrammarBackendTest, ConstructFromTokenizerInfoJson) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+TEST(XGrammarBackendTest, ConstructFromDirectTokenizerInfo) {
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     EXPECT_TRUE(backend.isEnabled());
 }
 
 TEST(XGrammarBackendTest, CompileBuiltinJSONViaSentinel) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
 
     GrammarKeyCpp key{"json", "$$ANY$$"};
     auto          result = backend.getOrCompile(key);
@@ -55,7 +54,7 @@ TEST(XGrammarBackendTest, CompileBuiltinJSONViaSentinel) {
 }
 
 TEST(XGrammarBackendTest, CompileSimpleJsonSchema) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     GrammarKeyCpp   key{"json", R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})"};
 
     auto result = backend.getOrCompile(key);
@@ -65,7 +64,7 @@ TEST(XGrammarBackendTest, CompileSimpleJsonSchema) {
 }
 
 TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     // Malformed JSON must surface as cacheable is_invalid, not throw.
     GrammarKeyCpp key{"json", "{this is not json at all"};
 
@@ -75,8 +74,48 @@ TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
     EXPECT_FALSE(result.error_message.empty());
 }
 
+TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyText) {
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
+    GrammarKeyCpp   key{"structural_tag",
+                      R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+                        R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
+                        R"({"type":"regex","pattern":"a"}]}})"};
+
+    auto result = backend.getOrCompile(key);
+    ASSERT_TRUE(result.compiled);
+    EXPECT_FALSE(result.is_invalid);
+    EXPECT_TRUE(result.error_message.empty());
+}
+
+TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyTextTokenEnd) {
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
+    GrammarKeyCpp   key{"structural_tag",
+                      R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+                        R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},)"
+                        R"("end":{"type":"token","token":122}},)"
+                        R"({"type":"regex","pattern":"a"}]}})"};
+
+    auto result = backend.getOrCompile(key);
+    ASSERT_TRUE(result.compiled);
+    EXPECT_FALSE(result.is_invalid);
+    EXPECT_TRUE(result.error_message.empty());
+}
+
+TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
+    GrammarKeyCpp   key{"structural_tag",
+                      R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+                        R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
+                        R"({"type":"any_text","max_tokens":1}]}})"};
+
+    auto result = backend.getOrCompile(key);
+    EXPECT_FALSE(result.compiled);
+    EXPECT_TRUE(result.is_invalid);
+    EXPECT_FALSE(result.error_message.empty());
+}
+
 TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     auto            result = backend.getOrCompile({"json", "$$ANY$$"});
     ASSERT_TRUE(result.compiled);
 
@@ -89,12 +128,12 @@ TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
 // ---- RtpGrammarMatcher rollback ----------------------------------------
 
 TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     auto            result = backend.getOrCompile({"regex", "a"});
     ASSERT_TRUE(result.compiled);
 
-    auto matcher = backend.createMatcher(result.compiled);
-    constexpr int kA = 'a';
+    auto          matcher = backend.createMatcher(result.compiled);
+    constexpr int kA      = 'a';
     EXPECT_TRUE(matcher->acceptToken(kA));
     EXPECT_EQ(matcher->numAcceptedTokens(), 1);
     matcher->rollback(1);

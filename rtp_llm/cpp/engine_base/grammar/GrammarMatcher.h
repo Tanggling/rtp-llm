@@ -24,10 +24,6 @@ public:
 
     virtual bool fillBitmask(DLTensor* bitmask, int32_t idx) = 0;
 
-    virtual bool isPassthroughForMask() const {
-        return false;
-    }
-
     virtual bool isTerminated() const = 0;
     virtual void rollback(int n)      = 0;
 

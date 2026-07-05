@@ -58,7 +58,6 @@ private:
         UNSET,
         NOOP,
         MASK,
-        PASSTHROUGH,
         TERMINATED,
         FINISHED,
     };
@@ -111,7 +110,6 @@ private:
     int       runSpecVerifyLocked(const SpecLogitsProcessorRequest& request, ErrorInfo& out_err);
 
     static void forceToken(const torch::Tensor& logits, int64_t token_id);
-    static void maskToken(const torch::Tensor& logits, int64_t token_id);
 
     std::shared_ptr<GrammarMatcher> matcher_;
     int64_t                         eos_token_id_       = 0;

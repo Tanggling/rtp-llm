@@ -11,6 +11,7 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
+from rtp_llm.config.response_format_builder import ReasoningFormat
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -316,6 +317,7 @@ class CustomChatRenderer:
         self.think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
             generate_env_config
         )
+        self.generate_env_config = generate_env_config
 
         # Store configs for subclasses
         self.ckpt_path = ckpt_path
@@ -367,6 +369,11 @@ class CustomChatRenderer:
             renderer_model_type=self.model_type,
             extra_stop_word_ids_list=extra_stop_word_ids_list,
             extra_stop_words_list=extra_stop_words_list,
+        )
+
+    def get_reasoning_format(self) -> ReasoningFormat:
+        return ReasoningFormat.from_model_type_and_env_config(
+            self.model_type, self.generate_env_config
         )
 
     def add_extra_stop_words(self, extra_stop_words: List[str]):

@@ -3,7 +3,7 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//visibility:public"])
 
-# Cooks xgrammar's TokenizerInfo opaque blob; private to this package.
+# Cooks xgrammar's TokenizerInfo; private to this package.
 cc_library(
     name = "grammar_xgrammar_cooker",
     hdrs = ["XGrammarTokenizerInfoCooker.h"],
@@ -30,6 +30,7 @@ cc_library(
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:special_tokens",
         "//rtp_llm/cpp/utils:core_utils",
+        "@xgrammar//:xgrammar",
     ] + torch_deps(),
     copts = copts(),
 )
@@ -38,13 +39,11 @@ cc_library(
 cc_library(
     name = "grammar_xgrammar",
     hdrs = [
-        "BudgetedReasoningGrammarMatcher.h",
         "GrammarMatcher.h",
         "RtpGrammarMatcher.h",
         "XGrammarBackend.h",
     ],
     srcs = [
-        "BudgetedReasoningGrammarMatcher.cc",
         "RtpGrammarMatcher.cc",
         "XGrammarBackend.cc",
     ],

@@ -7,6 +7,7 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
+from rtp_llm.config.response_format_builder import ResponseFormatBuilder
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
@@ -64,6 +65,7 @@ def trans_input(input_py: GenerateInput):
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # check generate config is valid before enter into engine
     input_py.generate_config.validate()
+    ResponseFormatBuilder(input_py.generate_config).apply()
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
@@ -108,6 +110,11 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "ebnf")
     if input_py.generate_config.structural_tag is not None:
         generate_config_pb.structural_tag.value = input_py.generate_config.structural_tag
+    generate_config_pb.grammar_terminate_without_stop_token = (
+        ResponseFormatBuilder.grammar_terminate_without_stop_token(
+            input_py.generate_config
+        )
+    )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

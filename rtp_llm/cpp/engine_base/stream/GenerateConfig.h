@@ -53,7 +53,7 @@ public:
     std::optional<std::string> regex;
     std::optional<std::string> ebnf;
     std::optional<std::string> structural_tag;
-    // response_format envelope is projected to the typed fields above in Python.
+    bool                       grammar_terminate_without_stop_token = false;
     std::string              adapter_name = "";
     std::vector<std::string> adapter_names;
 
@@ -143,7 +143,7 @@ public:
     }
 
     bool hasStructuredOutputRequest() const noexcept {
-        // Envelope is projected to typed fields by Python GenerateConfig.validate.
+        // response_format envelope is projected to typed fields by Python ResponseFormatBuilder.
         return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value();
     }
 

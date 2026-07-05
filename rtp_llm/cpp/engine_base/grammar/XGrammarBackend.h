@@ -43,21 +43,22 @@ struct CompileResult {
 };
 
 struct XGrammarBackendOptions {
-    bool                                any_whitespace            = true;
-    bool                                strict_mode               = true;
-    int                                 max_compiler_threads      = 8;
-    int64_t                             compiler_cache_bytes      = -1;  // unlimited
+    bool                                any_whitespace       = true;
+    bool                                strict_mode          = true;
+    int                                 max_compiler_threads = 8;
+    int64_t                             compiler_cache_bytes = -1;  // unlimited
     std::optional<std::vector<int32_t>> override_stop_tokens;
 };
 
 // Owns the xgrammar compiler; thread-safe, no GIL.
 class XGrammarBackend {
 public:
-    // tokenizer_info_json: xgrammar::TokenizerInfo::SerializeJSON(). Throws on parse fail.
-    XGrammarBackend(const std::string& tokenizer_info_json, const XGrammarBackendOptions& options);
+    // Production path: use constructor-built TokenizerInfo so xgrammar's derived indexes are intact.
+    XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info, const XGrammarBackendOptions& options);
+
     ~XGrammarBackend();
 
-    XGrammarBackend(const XGrammarBackend&)            = delete;
+    XGrammarBackend(const XGrammarBackend&) = delete;
     XGrammarBackend& operator=(const XGrammarBackend&) = delete;
 
     // Returns nullptr (not throw) when tokenizer is empty / build fails.

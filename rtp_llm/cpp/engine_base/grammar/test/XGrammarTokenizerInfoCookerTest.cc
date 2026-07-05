@@ -6,7 +6,7 @@ namespace rtp_llm::xgrammar_impl {
 namespace {
 
 // Regression: DetectMetadataFromHF returns vocab_type as JsonNumber (not int64_t Any).
-// cookTokenizerInfoOpaque must parse it via IsJsonNumber/JsonNumberCast.
+// cookTokenizerInfo must parse it via IsJsonNumber/JsonNumberCast.
 TEST(XGrammarTokenizerInfoCookerTest, ParsesAutilJsonNumberVocabType) {
     const auto any = autil::legacy::json::ParseJson(R"({"vocab_type":2,"add_prefix_space":false})");
     const auto*  map = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(&any);

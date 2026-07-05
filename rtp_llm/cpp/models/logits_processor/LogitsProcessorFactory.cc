@@ -1,13 +1,11 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 #include <memory>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/engine_base/grammar/BudgetedReasoningGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/GrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
@@ -48,13 +46,13 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
     if (config.structural_tag.has_value()) {
         return {"structural_tag", config.structural_tag.value()};
     }
-    // response_format envelope is projected to typed fields above in
-    // GenerateConfig.validate (Python). The C++ engine only consumes typed fields.
+    // response_format envelope is projected to typed fields above in Python ResponseFormatBuilder.
+    // The C++ engine only consumes typed fields.
     return {};
 }
 
 // Compile + matcher creation, given an already-resolved GrammarKeyCpp. On any
-// failure returns a non-ok ErrorResult carrying the original ErrorCode.
+// failure returns a non-ok ErrorResult with a user-facing grammar error.
 ErrorResult<std::shared_ptr<GrammarMatcher>>
 compileMatcherFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool terminate_without_stop_token) {
     // Lightweight size caps (xgrammar already validates schema/regex content).
@@ -69,14 +67,7 @@ compileMatcherFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool t
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + detail);
     }
 
-    CompileResult result;
-    try {
-        result = backend.getOrCompile(key);
-    } catch (const std::exception& e) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("grammar compile error: ") + e.what());
-    } catch (...) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, "grammar compile error: unknown exception");
-    }
+    CompileResult result = backend.getOrCompile(key);
     if (!result.compiled) {
         const std::string err = result.error_message.empty() ? "unknown compile error" : result.error_message;
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + err);
@@ -87,8 +78,6 @@ compileMatcherFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool t
         matcher = backend.createMatcher(result.compiled, terminate_without_stop_token);
     } catch (const std::exception& e) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("grammar matcher install failed: ") + e.what());
-    } catch (...) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, "grammar matcher install failed: unknown exception");
     }
     if (!matcher) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "grammar matcher install failed");
@@ -110,54 +99,19 @@ ErrorResult<BaseLogitsProcessorPtr> createGrammarProcessor(const std::shared_ptr
                          "(check engine startup logs: tokenizer info empty or backend init failed).");
     }
 
-    const bool        require_reasoning              = config.in_think_mode;
-    const bool        terminate_without_stop_token   = key.key_type == "json";
-    std::optional<int32_t> begin_think_id;
-    std::vector<int32_t>   end_think_token_ids;
-    if (require_reasoning) {
-        if (config.end_think_token_ids.empty()) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             "structured output with in_think_mode requires non-empty end_think_token_ids");
-        }
-        if (config.begin_think_token_ids.size() > 1) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             "structured output with in_think_mode supports at most one begin_think_token_id");
-        }
-        if (!config.begin_think_token_ids.empty()) {
-            begin_think_id = static_cast<int32_t>(config.begin_think_token_ids[0]);
-        }
-        end_think_token_ids.reserve(config.end_think_token_ids.size());
-        for (int token_id : config.end_think_token_ids) {
-            end_think_token_ids.push_back(static_cast<int32_t>(token_id));
-        }
-        RTP_LLM_LOG_DEBUG("reasoning grammar uses final-only inner matcher: final_type=%s, final_len=%zu, "
-                          "has_begin_think=%d, end_think_token_count=%zu, max_thinking_tokens=%ld, "
-                          "terminate_without_stop_token=%d",
-                          key.key_type.c_str(),
-                          key.key_string.size(),
-                          static_cast<int>(begin_think_id.has_value()),
-                          end_think_token_ids.size(),
-                          config.max_thinking_tokens,
-                          static_cast<int>(terminate_without_stop_token));
-    }
+    const bool terminate_without_stop_token = config.grammar_terminate_without_stop_token || key.key_type == "json";
+    RTP_LLM_LOG_DEBUG("grammar matcher install: type=%s, len=%zu, in_think_mode=%d, "
+                      "terminate_without_stop_token=%d",
+                      key.key_type.c_str(),
+                      key.key_string.size(),
+                      static_cast<int>(config.in_think_mode),
+                      static_cast<int>(terminate_without_stop_token));
 
     auto matcher_or = compileMatcherFromKey(*backend, key, terminate_without_stop_token);
     if (!matcher_or.ok()) {
         return matcher_or.status();
     }
     std::shared_ptr<GrammarMatcher> matcher = std::move(matcher_or.value());
-
-    if (require_reasoning) {
-        try {
-            matcher = std::make_shared<BudgetedReasoningGrammarMatcher>(std::move(matcher),
-                                                                         begin_think_id,
-                                                                         std::move(end_think_token_ids),
-                                                                         config.max_thinking_tokens);
-        } catch (const std::exception& e) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             std::string("reasoning grammar matcher install failed: ") + e.what());
-        }
-    }
     return BaseLogitsProcessorPtr(std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id));
 }
 

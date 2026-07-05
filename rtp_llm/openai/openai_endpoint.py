@@ -16,6 +16,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.response_format_builder import ResponseFormatBuilder
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -238,12 +239,15 @@ class OpenaiEndpoint(object):
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # OpenAI response_format takes precedence over grammar fields from extra_configs.
-        # GenerateConfig.validate() projects it to json_schema / regex / ebnf / structural_tag.
+        # ResponseFormatBuilder projects it to json_schema / regex / ebnf / structural_tag.
         if request.response_format is not None:
             config.response_format = request.response_format
+        reasoning_format = self.chat_renderer.get_reasoning_format()
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
         if request.disable_thinking():
             config.in_think_mode = False
+        config.validate()
+        ResponseFormatBuilder(config, reasoning_format=reasoning_format).apply()
         if request.debug_info:
             config.return_output_ids = True
         return config
