@@ -30,7 +30,7 @@ public:
     virtual int64_t numAcceptedTokens() const = 0;
     virtual int32_t vocabSize() const         = 0;
 
-    virtual void markFinished() = 0;
+    virtual void markFinished()   = 0;
     virtual bool finished() const = 0;
 };
 

@@ -316,7 +316,7 @@ class BaseModel(object):
             return
         self.model_config.tokenizer_vocab = real_tokenizer.get_vocab()
         self.model_config.tokenizer_backend_str = backend_tokenizer.to_str()
-        
+
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal
 

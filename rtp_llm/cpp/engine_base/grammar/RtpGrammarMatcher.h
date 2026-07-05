@@ -51,8 +51,8 @@ private:
     std::shared_ptr<xgrammar::CompiledGrammar> compiled_;
     std::unique_ptr<xgrammar::GrammarMatcher>  matcher_;
 
-    int64_t num_accepted_           = 0;
-    bool    finished_               = false;
+    int64_t num_accepted_ = 0;
+    bool    finished_     = false;
 };
 
 }  // namespace rtp_llm

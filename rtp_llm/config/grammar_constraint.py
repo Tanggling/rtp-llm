@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
-
 GrammarFieldName = Literal["json_schema", "regex", "ebnf", "structural_tag"]
 GrammarValue = Union[str, Dict[str, Any]]
 

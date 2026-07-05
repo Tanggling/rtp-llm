@@ -17,10 +17,7 @@ from pydantic import (
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.response_format import (
-    ResponseFormat,
-    parse_response_format,
-)
+from rtp_llm.config.response_format import ResponseFormat, parse_response_format
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info

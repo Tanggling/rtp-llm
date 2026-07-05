@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -14,7 +15,6 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.config.response_format_builder import (
     ReasoningFormat,

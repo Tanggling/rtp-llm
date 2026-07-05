@@ -48,7 +48,7 @@ public:
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
 private:
-    void initScheduler();
+    void                            initScheduler();
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);

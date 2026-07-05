@@ -11,7 +11,6 @@ from rtp_llm.config.grammar_constraint import (
     normalize_grammar_value,
 )
 
-
 DEFAULT_THINK_END_TAG = "</think>\n\n"
 
 

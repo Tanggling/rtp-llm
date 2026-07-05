@@ -10,7 +10,10 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
-from rtp_llm.config.response_format_builder import ReasoningFormat, ResponseFormatBuilder
+from rtp_llm.config.response_format_builder import (
+    ReasoningFormat,
+    ResponseFormatBuilder,
+)
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,

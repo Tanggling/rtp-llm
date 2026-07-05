@@ -578,8 +578,8 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerRejectsUnexpectedDraftColumns)
     const int    propose_step = 2;
     const size_t vocab_size   = 8;
 
-    auto proc = std::make_shared<FakeGrammarSpecLogitsProcessor>(
-        std::vector<std::vector<int32_t>>{{1}, {2}, {3}}, /*cap=*/propose_step);
+    auto proc = std::make_shared<FakeGrammarSpecLogitsProcessor>(std::vector<std::vector<int32_t>>{{1}, {2}, {3}},
+                                                                 /*cap=*/propose_step);
 
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams = batch_size;
@@ -616,8 +616,7 @@ TEST_F(MtpExecutorTest, testPrepareStreamsRejectsNormalDecodeOnlyProcessor) {
     ASSERT_TRUE(stream->hasError());
     auto error = stream->statusInfo();
     EXPECT_EQ(error.code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_NE(error.ToString().find("normal-decode-only logits processor"),
-              std::string::npos);
+    EXPECT_NE(error.ToString().find("normal-decode-only logits processor"), std::string::npos);
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {

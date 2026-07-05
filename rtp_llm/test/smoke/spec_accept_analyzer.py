@@ -104,25 +104,33 @@ def summarize(vals: List[int]) -> dict:
 
 def print_report(by_grammar, by_stream, propose_steps, total_lines):
     print("=" * 72)
-    print(f"sp_accept_trace: parsed {total_lines} lines, "
-          f"propose_steps observed = {sorted(propose_steps)}")
+    print(
+        f"sp_accept_trace: parsed {total_lines} lines, "
+        f"propose_steps observed = {sorted(propose_steps)}"
+    )
     print("=" * 72)
 
     kinds = sorted(by_grammar.keys())
     if not kinds:
-        print("No [sp_accept_trace] lines found. "
-              "Did the server run with RTP_SP_ACCEPT_TRACE=1?")
+        print(
+            "No [sp_accept_trace] lines found. "
+            "Did the server run with RTP_SP_ACCEPT_TRACE=1?"
+        )
         return
 
     # Summary table
     print()
-    print(f"{'grammar_kind':<16} {'count':>8} {'mean':>8} {'p50':>6} "
-          f"{'p90':>6} {'p95':>6} {'min':>5} {'max':>5}")
+    print(
+        f"{'grammar_kind':<16} {'count':>8} {'mean':>8} {'p50':>6} "
+        f"{'p90':>6} {'p95':>6} {'min':>5} {'max':>5}"
+    )
     print("-" * 72)
     for kind in kinds:
         s = summarize(by_grammar[kind])
-        print(f"{kind:<16} {s['count']:>8} {s['mean']:>8} {int(s['p50']):>6} "
-              f"{int(s['p90']):>6} {int(s['p95']):>6} {s['min']:>5} {s['max']:>5}")
+        print(
+            f"{kind:<16} {s['count']:>8} {s['mean']:>8} {int(s['p50']):>6} "
+            f"{int(s['p90']):>6} {int(s['p95']):>6} {s['min']:>5} {s['max']:>5}"
+        )
 
     # Histograms
     print()
@@ -151,19 +159,25 @@ def print_report(by_grammar, by_stream, propose_steps, total_lines):
             else:
                 ratio = float("nan")
             verdict = _verdict(ratio)
-            print(f"  {kind:<16}: mean={cur['mean']:>6}  ratio={ratio:.3f}  -> {verdict}")
+            print(
+                f"  {kind:<16}: mean={cur['mean']:>6}  ratio={ratio:.3f}  -> {verdict}"
+            )
 
     # Per-stream deep dive — useful when a few streams dominate
     print()
     print("Top 5 streams by sample count per grammar kind:")
     print("-" * 72)
     for kind in kinds:
-        streams_for_kind = [(sid, vals) for (k, sid), vals in by_stream.items() if k == kind]
+        streams_for_kind = [
+            (sid, vals) for (k, sid), vals in by_stream.items() if k == kind
+        ]
         streams_for_kind.sort(key=lambda x: -len(x[1]))
         for sid, vals in streams_for_kind[:5]:
             s = summarize(vals)
-            print(f"  {kind:<12} stream_id={sid:<10}  steps={s['count']:<4}  "
-                  f"mean={s['mean']:<6}  hist={s['histogram']}")
+            print(
+                f"  {kind:<12} stream_id={sid:<10}  steps={s['count']:<4}  "
+                f"mean={s['mean']:<6}  hist={s['histogram']}"
+            )
 
 
 def _verdict(ratio: float) -> str:
@@ -182,8 +196,11 @@ def _verdict(ratio: float) -> str:
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("paths", nargs="+", help="Log files or directories to scan.")
-    p.add_argument("--json", action="store_true",
-                   help="Emit machine-readable JSON instead of the human report.")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of the human report.",
+    )
     args = p.parse_args()
 
     by_grammar, by_stream, propose_steps, total_lines = parse_lines(args.paths)
@@ -194,8 +211,7 @@ def main():
             "propose_steps": sorted(propose_steps),
             "by_grammar": {k: summarize(v) for k, v in by_grammar.items()},
             "by_stream": {
-                f"{k}:{sid}": summarize(v)
-                for (k, sid), v in by_stream.items()
+                f"{k}:{sid}": summarize(v) for (k, sid), v in by_stream.items()
             },
         }
         json.dump(out, sys.stdout, indent=2, default=str)

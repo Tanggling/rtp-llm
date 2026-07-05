@@ -58,7 +58,7 @@ public:
 
     ~XGrammarBackend();
 
-    XGrammarBackend(const XGrammarBackend&) = delete;
+    XGrammarBackend(const XGrammarBackend&)            = delete;
     XGrammarBackend& operator=(const XGrammarBackend&) = delete;
 
     // Returns nullptr (not throw) when tokenizer is empty / build fails.

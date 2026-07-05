@@ -1,4 +1,4 @@
-// CPU unit tests for GrammarLogitsProcessor::tryAcceptAndFillBitmask over a 128-char ASCII vocab.
+// CPU unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <xgrammar/tokenizer_info.h>
@@ -67,6 +68,27 @@ bool rowAllows(const std::vector<int32_t>& bm, size_t words, int row, int token)
     return (static_cast<uint32_t>(word) & (1u << (token % 32))) != 0u;
 }
 
+SamplerInputs makeSamplerInputs(torch::Tensor logits) {
+    SamplerInputs inputs;
+    inputs.logits = std::move(logits);
+    return inputs;
+}
+
+std::vector<float> logitsVec(const torch::Tensor& logits) {
+    auto cpu = logits.cpu().contiguous();
+    return std::vector<float>(cpu.data_ptr<float>(), cpu.data_ptr<float>() + cpu.numel());
+}
+
+void expectTokenAllowed(const std::vector<float>& logits, int token) {
+    ASSERT_LT(token, static_cast<int>(logits.size()));
+    EXPECT_FLOAT_EQ(logits[token], 0.0f);
+}
+
+void expectTokenMasked(const std::vector<float>& logits, int token) {
+    ASSERT_LT(token, static_cast<int>(logits.size()));
+    EXPECT_LT(logits[token], -1e20f);
+}
+
 std::string makeReasoningStructuralTag(int budget) {
     return R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
            R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":)"
@@ -87,6 +109,75 @@ constexpr int kEos = 0;    // stop token in makeAsciiTokenizerInfo
 constexpr int kZ   = 'z';  // structural-tag think end in makeReasoningStructuralTag
 
 }  // namespace
+
+TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
+    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto            proc = makeProcessor(backend, "ab");
+
+    auto logits = torch::zeros({1, 128}, torch::kFloat32);
+    auto inputs = makeSamplerInputs(logits);
+    proc->process(inputs, 0, 1);
+
+    auto values = logitsVec(logits);
+    expectTokenAllowed(values, kA);
+    expectTokenMasked(values, kB);
+    expectTokenMasked(values, kX);
+    EXPECT_FALSE(proc->hasError());
+}
+
+TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesDecodeMaskState) {
+    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto            proc = makeProcessor(backend, "ab");
+
+    auto token_a = torch::tensor({kA}, torch::kInt32).reshape({1, 1});
+    proc->updateStatus(token_a, 1);
+    EXPECT_EQ(proc->committedOutputLen(), 1);
+    ASSERT_FALSE(proc->hasError());
+
+    auto logits = torch::zeros({1, 128}, torch::kFloat32);
+    auto inputs = makeSamplerInputs(logits);
+    proc->process(inputs, 0, 1);
+
+    auto values = logitsVec(logits);
+    expectTokenMasked(values, kA);
+    expectTokenAllowed(values, kB);
+    expectTokenMasked(values, kX);
+}
+
+TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
+    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto            proc = makeProcessor(backend, "ab");
+
+    proc->updateStatus(torch::tensor({kA}, torch::kInt32).reshape({1, 1}), 1);
+    proc->updateStatus(torch::tensor({kB}, torch::kInt32).reshape({1, 1}), 1);
+    ASSERT_FALSE(proc->hasError());
+    EXPECT_EQ(proc->committedOutputLen(), 2);
+    EXPECT_TRUE(proc.matcher->isTerminated());
+
+    auto logits = torch::zeros({1, 128}, torch::kFloat32);
+    auto inputs = makeSamplerInputs(logits);
+    proc->process(inputs, 0, 1);
+
+    auto values = logitsVec(logits);
+    expectTokenAllowed(values, kEos);
+    expectTokenMasked(values, kA);
+    expectTokenMasked(values, kB);
+
+    proc->updateStatus(torch::tensor({kEos}, torch::kInt32).reshape({1, 1}), 1);
+    EXPECT_EQ(proc->committedOutputLen(), 3);
+    EXPECT_TRUE(proc.matcher->finished());
+}
+
+TEST(GrammarLogitsProcessorTest, UpdateStatusReportsInvalidCommittedToken) {
+    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto            proc = makeProcessor(backend, "ab");
+
+    proc->updateStatus(torch::tensor({kX}, torch::kInt32).reshape({1, 1}), 1);
+
+    ASSERT_TRUE(proc->hasError());
+    EXPECT_EQ(proc->error().code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+    EXPECT_EQ(proc->committedOutputLen(), 0);
+}
 
 // regex "ab": legal sequence is 'a' then 'b'. A fully-legal draft chain should
 // return cap == propose_step with each row constraining to the expected token.

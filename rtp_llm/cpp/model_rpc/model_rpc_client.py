@@ -106,7 +106,9 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "regex")
     trans_option(generate_config_pb, input_py.generate_config, "ebnf")
     if input_py.generate_config.structural_tag is not None:
-        generate_config_pb.structural_tag.value = input_py.generate_config.structural_tag
+        generate_config_pb.structural_tag.value = (
+            input_py.generate_config.structural_tag
+        )
     generate_config_pb.grammar_terminate_without_stop_token = (
         ResponseFormatBuilder.grammar_terminate_without_stop_token(
             input_py.generate_config

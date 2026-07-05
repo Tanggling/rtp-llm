@@ -1,11 +1,7 @@
 import json
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class ResponseFormatJSONSchema(BaseModel):

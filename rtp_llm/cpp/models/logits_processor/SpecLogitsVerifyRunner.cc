@@ -120,8 +120,7 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
 
     const auto& draft_tokens = task.draft_tokens;
     RTP_LLM_CHECK_WITH_INFO(draft_tokens.defined(), "MTP spec logits verify requires draft tokens");
-    RTP_LLM_CHECK_WITH_INFO(draft_tokens.numel() % B == 0,
-                            "MTP spec logits verify draft token shape mismatch");
+    RTP_LLM_CHECK_WITH_INFO(draft_tokens.numel() % B == 0, "MTP spec logits verify draft token shape mismatch");
     const int64_t draft_cols   = draft_tokens.numel() / B;
     const int64_t draft_offset = draft_cols == P + 1 ? 1 : 0;
     RTP_LLM_CHECK_WITH_INFO(draft_cols == P || draft_cols == P + 1,
@@ -152,9 +151,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         return result;
     }
 
-    const size_t B    = task.total_streams;
-    const int    P    = task.propose_step;
-    const size_t V    = task.vocab_size;
+    const size_t B = task.total_streams;
+    const int    P = task.propose_step;
+    const size_t V = task.vocab_size;
     RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
     const size_t W    = SpecLogitsProcessor::bitmaskWordCount(V);
     const size_t rows = B * static_cast<size_t>(P + 1);

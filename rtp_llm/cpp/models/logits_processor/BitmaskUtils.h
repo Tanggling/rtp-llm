@@ -34,13 +34,6 @@ inline bool bitmaskAllowsToken(const int32_t* bitmask, size_t words, int32_t tok
     return (word & (1u << (token_id % 32))) != 0u;
 }
 
-inline void clearTokenFromBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
-    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
-        return;
-    }
-    bitmask[token_id / 32] &= ~(1u << (token_id % 32));
-}
-
 // Out-of-range token_id is a caller bug; abort instead of returning an all-disabled row.
 inline void forceTokenInBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
     RTP_LLM_CHECK_WITH_INFO(token_id >= 0 && static_cast<size_t>(token_id / 32) < words,
