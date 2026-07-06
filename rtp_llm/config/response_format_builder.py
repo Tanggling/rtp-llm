@@ -1,5 +1,8 @@
 from dataclasses import dataclass
+from json import JSONDecodeError
 from typing import Any, Dict, List, Optional, Union
+
+from pydantic import ValidationError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import (
@@ -10,6 +13,7 @@ from rtp_llm.config.grammar_constraint import (
     load_json_field,
     normalize_grammar_value,
 )
+from rtp_llm.config.response_format import parse_response_format
 
 DEFAULT_THINK_END_TAG = "</think>\n\n"
 
@@ -102,7 +106,19 @@ class ResponseFormatBuilder:
 
     def _project_response_format_to_grammar_fields(self) -> None:
         """Project response_format onto typed fields and clear it; rf wins over stale extra_configs grammar."""
-        rf = self.config.response_format
+        raw_response_format = self.config.response_format
+        if raw_response_format is None:
+            return
+
+        try:
+            rf = parse_response_format(raw_response_format)
+        except (JSONDecodeError, ValidationError, TypeError) as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"response_format invalid: {str(e)}",
+            )
+
+        self.config.response_format = rf
         if rf is None:
             return
 

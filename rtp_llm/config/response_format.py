@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional, TypeAlias, Union
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -58,3 +58,6 @@ def parse_response_format(value: Any) -> Optional[ResponseFormat]:
             return None
         return ResponseFormat(**value)
     raise TypeError(f"response_format has unsupported type {type(value).__name__}")
+
+
+ResponseFormatInput: TypeAlias = Union[ResponseFormat, Dict[str, Any], str]

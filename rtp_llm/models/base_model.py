@@ -301,7 +301,6 @@ class BaseModel(object):
         self._fill_xgrammar_tokenizer_info()
 
     def _fill_xgrammar_tokenizer_info(self) -> None:
-        """Fill tokenizer-derived C++ init params for xgrammar when available."""
         real_tokenizer = self.tokenizer.get_real_tokenizer()
         if real_tokenizer is None:
             return
@@ -310,10 +309,10 @@ class BaseModel(object):
         if not hasattr(real_tokenizer, "get_vocab") or not hasattr(
             backend_tokenizer, "to_str"
         ):
-            logging.warning(
-                "Tokenizer does not expose HuggingFace backend info; grammar disabled"
-            )
-            return
+            message = "Tokenizer does not expose HuggingFace backend info"
+            logging.warning(message)
+            raise RuntimeError(message)
+
         self.model_config.tokenizer_vocab = real_tokenizer.get_vocab()
         self.model_config.tokenizer_backend_str = backend_tokenizer.to_str()
 

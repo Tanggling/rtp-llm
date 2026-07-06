@@ -2,14 +2,10 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.response_format import (
-    ResponseFormat,
-    ResponseFormatJSONSchema,
-    parse_response_format,
-)
+from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -166,11 +162,6 @@ class ChatCompletionRequest(BaseModel):
     )
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
-
-    @field_validator("response_format", mode="before")
-    @classmethod
-    def _parse_response_format(cls, v):
-        return parse_response_format(v)
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
