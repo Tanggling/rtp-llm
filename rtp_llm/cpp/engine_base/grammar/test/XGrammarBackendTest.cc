@@ -47,7 +47,7 @@ TEST(XGrammarBackendTest, CompileBuiltinJSONViaSentinel) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
 
     GrammarKeyCpp key{"json", "$$ANY$$"};
-    auto          result = backend.getOrCompile(key);
+    auto          result = backend.compile(key);
     ASSERT_TRUE(result.compiled) << "$$ANY$$ should map to builtin JSON grammar";
     EXPECT_FALSE(result.is_invalid);
     EXPECT_GT(result.compiled->MemorySizeBytes(), 0u);
@@ -57,7 +57,7 @@ TEST(XGrammarBackendTest, CompileSimpleJsonSchema) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     GrammarKeyCpp   key{"json", R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})"};
 
-    auto result = backend.getOrCompile(key);
+    auto result = backend.compile(key);
     ASSERT_TRUE(result.compiled);
     EXPECT_FALSE(result.is_invalid);
     EXPECT_TRUE(result.error_message.empty());
@@ -68,7 +68,7 @@ TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
     // Malformed JSON must surface as cacheable is_invalid, not throw.
     GrammarKeyCpp key{"json", "{this is not json at all"};
 
-    auto result = backend.getOrCompile(key);
+    auto result = backend.compile(key);
     EXPECT_FALSE(result.compiled);
     EXPECT_TRUE(result.is_invalid);
     EXPECT_FALSE(result.error_message.empty());
@@ -81,7 +81,7 @@ TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyText) {
                         R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
                         R"({"type":"regex","pattern":"a"}]}})"};
 
-    auto result = backend.getOrCompile(key);
+    auto result = backend.compile(key);
     ASSERT_TRUE(result.compiled);
     EXPECT_FALSE(result.is_invalid);
     EXPECT_TRUE(result.error_message.empty());
@@ -95,7 +95,7 @@ TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyTextTokenEnd) {
                         R"("end":{"type":"token","token":122}},)"
                         R"({"type":"regex","pattern":"a"}]}})"};
 
-    auto result = backend.getOrCompile(key);
+    auto result = backend.compile(key);
     ASSERT_TRUE(result.compiled);
     EXPECT_FALSE(result.is_invalid);
     EXPECT_TRUE(result.error_message.empty());
@@ -108,7 +108,7 @@ TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
                         R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
                         R"({"type":"any_text","max_tokens":1}]}})"};
 
-    auto result = backend.getOrCompile(key);
+    auto result = backend.compile(key);
     EXPECT_FALSE(result.compiled);
     EXPECT_TRUE(result.is_invalid);
     EXPECT_FALSE(result.error_message.empty());
@@ -116,7 +116,7 @@ TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
 
 TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
-    auto            result = backend.getOrCompile({"json", "$$ANY$$"});
+    auto            result = backend.compile({"json", "$$ANY$$"});
     ASSERT_TRUE(result.compiled);
 
     auto matcher = backend.createMatcher(result.compiled);
@@ -129,7 +129,7 @@ TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
 
 TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
-    auto            result = backend.getOrCompile({"regex", "a"});
+    auto            result = backend.compile({"regex", "a"});
     ASSERT_TRUE(result.compiled);
 
     auto          matcher = backend.createMatcher(result.compiled);

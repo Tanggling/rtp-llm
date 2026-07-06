@@ -68,8 +68,8 @@ public:
     // True iff the tokenizer is non-empty so the backend can compile / mask grammars.
     bool isEnabled() const noexcept;
 
-    // Synchronous; concurrent same-key compiles dedup inside xgrammar::GrammarCompiler.
-    CompileResult getOrCompile(const GrammarKeyCpp& key);
+    // Synchronous; cache and concurrent same-key races are handled inside xgrammar::GrammarCompiler.
+    CompileResult compile(const GrammarKeyCpp& key);
 
     std::shared_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                                      bool terminate_without_stop_token = false);
@@ -80,8 +80,6 @@ private:
     XGrammarBackendOptions    options_;
     xgrammar::TokenizerInfo   tokenizer_info_;
     xgrammar::GrammarCompiler compiler_;
-
-    CompileResult compileNow(const GrammarKeyCpp& key);
 };
 
 }  // namespace rtp_llm

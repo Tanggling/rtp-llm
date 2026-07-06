@@ -40,7 +40,6 @@ private:
                      const std::list<GenerateStreamPtr>& streams,
                      SamplerOutput&                      draft_sampler_output,
                      SamplerOutput&                      target_sampler_output) const;
-
     void streamSample(SpeculativeSamplerOutput&           sample_output,
                       const std::list<GenerateStreamPtr>& streams,
                       SamplerOutput&                      draft_sampler_output,

@@ -9,7 +9,6 @@ cc_library(
     deps = [
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
-        "//rtp_llm/cpp/pybind:py_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -78,7 +77,6 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
@@ -87,7 +85,6 @@ cc_library(
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
         ],
-        "@//:using_rocm": [],
         "//conditions:default": [],
     }),
     copts = copts(),

@@ -55,7 +55,7 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
 // failure returns a non-ok ErrorResult with a user-facing grammar error.
 ErrorResult<std::shared_ptr<GrammarMatcher>>
 compileMatcherFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool terminate_without_stop_token) {
-    CompileResult result = backend.getOrCompile(key);
+    CompileResult result = backend.compile(key);
     if (!result.compiled) {
         const std::string err = result.error_message.empty() ? "unknown compile error" : result.error_message;
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + err);
@@ -132,13 +132,11 @@ LogitsProcessorFactory::createLogitsProcessors(const std::shared_ptr<XGrammarBac
                              "grammar-constrained decoding does not support beam search or "
                              "num_return_sequences > 1");
         }
-        auto grammar_or = createGrammarProcessor(grammar_backend, generate_input, grammar_key, eos_token_id);
-        if (!grammar_or.ok()) {
-            return grammar_or.status();
+        auto grammar_processor_result = createGrammarProcessor(grammar_backend, generate_input, grammar_key, eos_token_id);
+        if (!grammar_processor_result.ok()) {
+            return grammar_processor_result.status();
         }
-        if (grammar_or.value()) {
-            result.push_back(std::move(grammar_or.value()));
-        }
+        result.push_back(std::move(grammar_processor_result.value()));
     }
 
     auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);

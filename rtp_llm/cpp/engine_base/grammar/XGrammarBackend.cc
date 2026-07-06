@@ -73,75 +73,75 @@ bool XGrammarBackend::isEnabled() const noexcept {
 }
 
 // Thread-safe via xgrammar::GrammarCompiler's internal cache.
-CompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
-    const auto    t_start = std::chrono::steady_clock::now();
-    const auto&   s       = key.key_string;
-    CompileResult result;
-
-    // Pick the underlying xgrammar call once; one try/catch covers all four key_types.
-    // User grammar rejection → is_invalid=true; system errors retain retry semantics.
-    std::function<xgrammar::CompiledGrammar()> do_compile;
-    if (key.key_type == "json") {
-        // "$$ANY$$" → any JSON value (response_format=json_object).
-        do_compile = [&] {
-            return s == "$$ANY$$" ? compiler_.CompileBuiltinJSONGrammar() :
-                                    compiler_.CompileJSONSchema(
-                                        s, options_.any_whitespace, std::nullopt, std::nullopt, options_.strict_mode);
-        };
-    } else if (key.key_type == "regex") {
-        do_compile = [&] { return compiler_.CompileRegex(s); };
-    } else if (key.key_type == "ebnf") {
-        do_compile = [&] { return compiler_.CompileGrammar(s); };
-    } else if (key.key_type == "structural_tag") {
-        do_compile = [&] { return compiler_.CompileStructuralTag(s); };
-    } else {
-        result.is_invalid    = true;
-        result.error_message = "Unknown grammar key_type: " + key.key_type;
-    }
-
-    if (do_compile) {
-        try {
-            result.compiled = std::make_shared<xgrammar::CompiledGrammar>(do_compile());
-        } catch (const std::bad_alloc& e) {
-            result.is_invalid    = false;
-            result.error_message = std::string("system error (retryable): ") + e.what();
-        } catch (const std::runtime_error& e) {
-            result.is_invalid    = true;
-            result.error_message = e.what();
-        } catch (const std::exception& e) {
-            result.is_invalid    = false;
-            result.error_message = std::string("unexpected error (retryable): ") + e.what();
-        }
-    }
-
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_start).count();
-    if (result.compiled) {
-        RTP_LLM_LOG_INFO("XGrammarBackend compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
-                         key.key_type.c_str(),
-                         key.key_string.size(),
-                         static_cast<long long>(elapsed_ms),
-                         result.compiled->MemorySizeBytes());
-    } else {
-        RTP_LLM_LOG_WARNING("XGrammarBackend compile FAIL: type=%s, len=%zu, elapsed_ms=%lld, invalid=%d, err=%s",
-                            key.key_type.c_str(),
-                            key.key_string.size(),
-                            static_cast<long long>(elapsed_ms),
-                            static_cast<int>(result.is_invalid),
-                            result.error_message.c_str());
-    }
-    return result;
-}
-
-// Synchronous; caching and same-key races are handled by xgrammar::GrammarCompiler.
-CompileResult XGrammarBackend::getOrCompile(const GrammarKeyCpp& key) {
+CompileResult XGrammarBackend::compile(const GrammarKeyCpp& key) {
     try {
-        return compileNow(key);
+        const auto    t_start = std::chrono::steady_clock::now();
+        const auto&   s       = key.key_string;
+        CompileResult result;
+
+        // Pick the underlying xgrammar call once; one try/catch covers all four key_types.
+        // User grammar rejection → is_invalid=true; system errors retain retry semantics.
+        std::function<xgrammar::CompiledGrammar()> do_compile;
+        if (key.key_type == "json") {
+            // "$$ANY$$" → any JSON value (response_format=json_object).
+            do_compile = [&] {
+                return s == "$$ANY$$" ?
+                           compiler_.CompileBuiltinJSONGrammar() :
+                           compiler_.CompileJSONSchema(
+                               s, options_.any_whitespace, std::nullopt, std::nullopt, options_.strict_mode);
+            };
+        } else if (key.key_type == "regex") {
+            do_compile = [&] { return compiler_.CompileRegex(s); };
+        } else if (key.key_type == "ebnf") {
+            do_compile = [&] { return compiler_.CompileGrammar(s); };
+        } else if (key.key_type == "structural_tag") {
+            do_compile = [&] { return compiler_.CompileStructuralTag(s); };
+        } else {
+            result.is_invalid    = true;
+            result.error_message = "Unknown grammar key_type: " + key.key_type;
+        }
+
+        if (do_compile) {
+            try {
+                result.compiled = std::make_shared<xgrammar::CompiledGrammar>(do_compile());
+            } catch (const std::bad_alloc& e) {
+                result.is_invalid    = false;
+                result.error_message = std::string("system error (retryable): ") + e.what();
+            } catch (const std::runtime_error& e) {
+                result.is_invalid    = true;
+                result.error_message = e.what();
+            } catch (const std::exception& e) {
+                result.is_invalid    = false;
+                result.error_message = std::string("unexpected error (retryable): ") + e.what();
+            }
+        }
+
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_start).count();
+        if (result.compiled) {
+            RTP_LLM_LOG_INFO("XGrammarBackend compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
+                             key.key_type.c_str(),
+                             key.key_string.size(),
+                             static_cast<long long>(elapsed_ms),
+                             result.compiled->MemorySizeBytes());
+        } else {
+            RTP_LLM_LOG_WARNING("XGrammarBackend compile FAIL: type=%s, len=%zu, elapsed_ms=%lld, invalid=%d, err=%s",
+                                key.key_type.c_str(),
+                                key.key_string.size(),
+                                static_cast<long long>(elapsed_ms),
+                                static_cast<int>(result.is_invalid),
+                                result.error_message.c_str());
+        }
+        return result;
     } catch (const std::exception& e) {
         CompileResult result;
         result.compiled      = nullptr;
         result.is_invalid    = false;
-        result.error_message = std::string("getOrCompile: unexpected throw: ") + e.what();
+        result.error_message = std::string("compile: unexpected throw: ") + e.what();
+        RTP_LLM_LOG_WARNING("XGrammarBackend compile FAIL: type=%s, len=%zu, invalid=0, err=%s",
+                            key.key_type.c_str(),
+                            key.key_string.size(),
+                            result.error_message.c_str());
         return result;
     }
 }

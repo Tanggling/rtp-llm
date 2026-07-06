@@ -51,7 +51,7 @@ struct ProcessorBundle {
 
 ProcessorBundle
 makeProcessorFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool terminate_without_stop_token = true) {
-    auto compiled = backend.getOrCompile(key).compiled;
+    auto compiled = backend.compile(key).compiled;
     EXPECT_TRUE(compiled);
     std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled, terminate_without_stop_token);
     auto                               proc    = std::make_shared<GrammarLogitsProcessor>(matcher);

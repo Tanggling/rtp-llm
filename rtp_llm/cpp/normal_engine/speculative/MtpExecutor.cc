@@ -986,8 +986,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     auto pre_target_token = torch::empty({(int64_t)batch_size}, torch::kInt32);
     int  batch_idx        = 0;
     for (const auto& stream : stream_groups.allStreams()) {
-        int* propose_tokens                             = stream->getSPOutputBuffer()->tokens.data_ptr<int>();
-        pre_target_token.data_ptr<int32_t>()[batch_idx] = propose_tokens[0];
+        int* propose_tokens                         = stream->getSPOutputBuffer()->tokens.data_ptr<int>();
+        pre_target_token.data_ptr<int>()[batch_idx] = propose_tokens[0];
         batch_idx++;
     }
 
@@ -1040,10 +1040,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                           torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
 
         for (int i = 0; i < batch_size; i++) {
-            input_lengths.data_ptr<int32_t>()[i] = propose_step_ + 1;
+            input_lengths.data_ptr<int>()[i] = propose_step_ + 1;
         }
         for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
-            lm_output_indexes.data_ptr<int32_t>()[i] = i;
+            lm_output_indexes.data_ptr<int>()[i] = i;
         }
 
         model_input.input_lengths     = std::move(input_lengths);
