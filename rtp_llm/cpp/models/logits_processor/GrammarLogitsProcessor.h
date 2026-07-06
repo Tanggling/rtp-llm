@@ -16,6 +16,38 @@ namespace rtp_llm {
 
 class RtpGrammarMatcher;
 
+class ProcessorErrorState {
+public:
+    bool hasError() const {
+        return has_error_.load(std::memory_order_acquire);
+    }
+
+    ErrorInfo error() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return error_info_;
+    }
+
+    void set(const ErrorInfo& info) {
+        if (!info.hasError()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!has_error_.load(std::memory_order_relaxed)) {
+            error_info_ = info;
+            has_error_.store(true, std::memory_order_release);
+        }
+    }
+
+    void set(ErrorCode code, std::string msg) {
+        set(ErrorInfo(code, std::move(msg)));
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::atomic<bool>  has_error_{false};
+    ErrorInfo          error_info_;
+};
+
 class GrammarLogitsProcessor final: public SpecLogitsProcessor {
 public:
     explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id = 0);
@@ -38,40 +70,31 @@ public:
     }
 
     bool hasError() const override {
-        return has_error_.load(std::memory_order_acquire);
+        return error_state_.hasError();
     }
     ErrorInfo error() const override {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        return error_info_;
+        return error_state_.error();
     }
 
 private:
     class DecodeMaskBuilder;
 
     void setError(ErrorCode code, std::string msg) {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        if (!has_error_.load(std::memory_order_relaxed)) {
-            error_info_ = ErrorInfo(code, std::move(msg));
-            has_error_.store(true, std::memory_order_release);
-        }
+        error_state_.set(code, std::move(msg));
     }
     void setError(const ErrorInfo& info) {
-        if (!info.hasError()) {
-            return;
-        }
-        setError(info.code(), info.ToString());
+        error_state_.set(info);
     }
 
-    void acceptCommittedLocked(const int32_t* tokens, size_t n, ErrorInfo& out_err);
+    ErrorInfo acceptCommittedLocked(const int32_t* tokens, size_t n);
 
     std::shared_ptr<RtpGrammarMatcher> matcher_;
     int64_t                            eos_token_id_       = 0;
     int64_t                            accepted_token_len_ = 0;
     std::unique_ptr<DecodeMaskBuilder> decode_mask_builder_;
 
-    mutable std::mutex state_mutex_;
-    std::atomic<bool>  has_error_{false};
-    ErrorInfo          error_info_;
+    mutable std::mutex  state_mutex_;
+    ProcessorErrorState error_state_;
 };
 
 }  // namespace rtp_llm

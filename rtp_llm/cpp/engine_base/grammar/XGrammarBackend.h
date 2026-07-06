@@ -50,7 +50,7 @@ public:
 
     ~XGrammarBackend();
 
-    XGrammarBackend(const XGrammarBackend&)            = delete;
+    XGrammarBackend(const XGrammarBackend&) = delete;
     XGrammarBackend& operator=(const XGrammarBackend&) = delete;
 
     // Returns nullptr (not throw) when tokenizer info is empty / invalid / build fails.
@@ -64,8 +64,13 @@ public:
     // InvalidArgument means user-facing grammar rejection; other failures are system/retryable.
     absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> compile(const GrammarKeyCpp& key);
 
-    std::shared_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                     bool terminate_without_stop_token = false);
+    // Creates a fresh per-stream matcher from a grammar key. The compiled grammar is
+    // cached by compile(); matcher state itself is never shared across streams.
+    absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> createMatcherFromKey(const GrammarKeyCpp& key,
+                                                                            bool terminate_without_stop_token = false);
+
+    absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
+    createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled, bool terminate_without_stop_token = false);
 
     void clear();
 

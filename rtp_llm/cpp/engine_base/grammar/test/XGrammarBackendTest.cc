@@ -123,10 +123,13 @@ TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     auto            result = backend.compile({"json", "$$ANY$$"});
     ASSERT_TRUE(result.ok()) << result.status().ToString();
 
-    auto matcher = backend.createMatcher(result.value());
-    ASSERT_TRUE(matcher);
+    auto matcher_or = backend.createMatcher(result.value());
+    ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+    auto matcher = matcher_or.value();
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
-    EXPECT_FALSE(matcher->isTerminated());
+    auto terminated = matcher->isTerminated();
+    ASSERT_TRUE(terminated.ok());
+    EXPECT_FALSE(terminated.value());
 }
 
 // ---- RtpGrammarMatcher rollback ----------------------------------------
@@ -136,11 +139,15 @@ TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
     auto            result = backend.compile({"regex", "a"});
     ASSERT_TRUE(result.ok()) << result.status().ToString();
 
-    auto          matcher = backend.createMatcher(result.value());
-    constexpr int kA      = 'a';
-    EXPECT_TRUE(matcher->acceptToken(kA));
+    auto matcher_or = backend.createMatcher(result.value());
+    ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+    auto          matcher  = matcher_or.value();
+    constexpr int kA       = 'a';
+    auto          accepted = matcher->acceptToken(kA);
+    ASSERT_TRUE(accepted.ok());
+    EXPECT_TRUE(accepted.value());
     EXPECT_EQ(matcher->numAcceptedTokens(), 1);
-    matcher->rollback(1);
+    EXPECT_FALSE(matcher->rollback(1).hasError());
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
 }
 

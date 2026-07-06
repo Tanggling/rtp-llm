@@ -53,9 +53,17 @@ ProcessorBundle
 makeProcessorFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool terminate_without_stop_token = true) {
     auto compiled_or = backend.compile(key);
     EXPECT_TRUE(compiled_or.ok()) << compiled_or.status().ToString();
-    auto                               compiled = compiled_or.value();
-    std::shared_ptr<RtpGrammarMatcher> matcher  = backend.createMatcher(compiled, terminate_without_stop_token);
-    auto                               proc     = std::make_shared<GrammarLogitsProcessor>(matcher);
+    if (!compiled_or.ok()) {
+        return {};
+    }
+    auto compiled   = compiled_or.value();
+    auto matcher_or = backend.createMatcher(compiled, terminate_without_stop_token);
+    EXPECT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+    if (!matcher_or.ok()) {
+        return {};
+    }
+    auto matcher = matcher_or.value();
+    auto proc    = std::make_shared<GrammarLogitsProcessor>(matcher);
     return {std::move(proc), std::move(matcher)};
 }
 
@@ -88,6 +96,18 @@ void expectTokenAllowed(const std::vector<float>& logits, int token) {
 void expectTokenMasked(const std::vector<float>& logits, int token) {
     ASSERT_LT(token, static_cast<int>(logits.size()));
     EXPECT_LT(logits[token], -1e20f);
+}
+
+bool matcherTerminated(const RtpGrammarMatcher& matcher) {
+    auto terminated = matcher.isTerminated();
+    EXPECT_TRUE(terminated.ok());
+    return terminated.ok() && terminated.value();
+}
+
+bool acceptMatcherToken(RtpGrammarMatcher& matcher, int32_t token) {
+    auto accepted = matcher.acceptToken(token);
+    EXPECT_TRUE(accepted.ok());
+    return accepted.ok() && accepted.value();
 }
 
 std::string makeReasoningStructuralTag(int budget) {
@@ -153,7 +173,7 @@ TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
     proc->updateStatus(torch::tensor({kB}, torch::kInt32).reshape({1, 1}), 1);
     ASSERT_FALSE(proc->hasError());
     EXPECT_EQ(proc->committedOutputLen(), 2);
-    EXPECT_TRUE(proc.matcher->isTerminated());
+    EXPECT_TRUE(matcherTerminated(*proc.matcher));
 
     auto logits = torch::zeros({1, 128}, torch::kFloat32);
     auto inputs = makeSamplerInputs(logits);
@@ -248,7 +268,7 @@ TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
     int cap = 0;
     ASSERT_NO_THROW({ cap = proc->tryAcceptAndFillBitmask(req); });
     EXPECT_EQ(cap, 2) << "grammar completes after 'ab'; trailing draft must not advance matcher";
-    EXPECT_FALSE(proc.matcher.get()->isTerminated()) << "provisional accepts must roll back committed matcher state";
+    EXPECT_FALSE(matcherTerminated(*proc.matcher)) << "provisional accepts must roll back committed matcher state";
     // Unfilled rows stay at allow-all (init + fill_row never reached offset 2+).
     EXPECT_TRUE(rowAllows(bm, words, 3, kX));
 }
@@ -271,16 +291,16 @@ TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
 
     const int cap = proc->tryAcceptAndFillBitmask(req);
     EXPECT_EQ(cap, 2);
-    EXPECT_FALSE(proc.matcher.get()->isTerminated());
+    EXPECT_FALSE(matcherTerminated(*proc.matcher));
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
     XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
     auto            proc = makeProcessor(backend, "ab");
 
-    ASSERT_TRUE(proc.matcher.get()->acceptToken(kA));
-    ASSERT_TRUE(proc.matcher.get()->acceptToken(kB));
-    EXPECT_TRUE(proc.matcher->isTerminated());
+    ASSERT_TRUE(acceptMatcherToken(*proc.matcher, kA));
+    ASSERT_TRUE(acceptMatcherToken(*proc.matcher, kB));
+    EXPECT_TRUE(matcherTerminated(*proc.matcher));
 
     const int            propose_step = 2;
     const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
@@ -295,7 +315,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
     req.vocab_size         = 128;
 
     EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
-    EXPECT_TRUE(proc.matcher->isTerminated());
+    EXPECT_TRUE(matcherTerminated(*proc.matcher));
 }
 
 // tryAcceptAndFillBitmask must leave the matcher's committed state unchanged

@@ -12,7 +12,6 @@
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -151,11 +150,36 @@ absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> XGrammarBackend::comp
     return result;
 }
 
-std::shared_ptr<RtpGrammarMatcher> XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                                  bool terminate_without_stop_token) {
-    RTP_LLM_CHECK_WITH_INFO(compiled != nullptr, "createMatcher requires a non-null CompiledGrammar");
-    return std::make_shared<RtpGrammarMatcher>(
-        std::move(compiled), options_.override_stop_tokens, terminate_without_stop_token);
+absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
+XGrammarBackend::createMatcherFromKey(const GrammarKeyCpp& key, bool terminate_without_stop_token) {
+    auto compiled_or = compile(key);
+    if (!compiled_or.ok()) {
+        const std::string err = compiled_or.status().message().empty() ? "unknown compile error" :
+                                                                         std::string(compiled_or.status().message());
+        return absl::Status(compiled_or.status().code(), "Failed to compile " + key.key_type + " grammar: " + err);
+    }
+
+    auto matcher_or = createMatcher(std::move(compiled_or.value()), terminate_without_stop_token);
+    if (!matcher_or.ok()) {
+        return matcher_or.status();
+    }
+    return matcher_or.value();
+}
+
+absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
+XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled, bool terminate_without_stop_token) {
+    if (!compiled) {
+        return absl::InvalidArgumentError("createMatcher requires a non-null CompiledGrammar");
+    }
+    try {
+        return std::make_shared<RtpGrammarMatcher>(
+            std::move(compiled), options_.override_stop_tokens, terminate_without_stop_token);
+    } catch (const std::exception& e) {
+        return absl::InvalidArgumentError(std::string("grammar matcher install failed: ") + e.what());
+    } catch (...) {
+        const auto error = absl::UnknownError("grammar matcher install failed: unknown");
+        return error;
+    }
 }
 
 void XGrammarBackend::clear() {

@@ -89,14 +89,17 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     // Surface factory errors (grammar compile, etc.) on the stream during construction.
     {
-        auto factory_result = LogitsProcessorFactory::createLogitsProcessors(resource_context.grammar_backend,
-                                                                             generate_input_,
-                                                                             init_batch_size,
-                                                                             maxBatchSize(),
-                                                                             special_tokens_.eos_token_id);
+        LogitsProcessorFactoryParams factory_params;
+        factory_params.grammar_backend = resource_context.grammar_backend;
+        factory_params.generate_input  = generate_input_;
+        factory_params.init_batch_size = init_batch_size;
+        factory_params.max_batch_size  = maxBatchSize();
+        factory_params.eos_token_id    = special_tokens_.eos_token_id;
+
+        auto factory_result = LogitsProcessorFactory::createLogitsProcessors(factory_params);
         if (!factory_result.ok()) {
             const auto& err = factory_result.status();
-            generate_status_->reportEvent(StreamEvents::Error, err.code(), err.ToString());
+            reportErrorWithoutLock(err.code(), err.ToString());
         } else {
             logits_processor_list_ = std::move(factory_result.value());
         }
@@ -733,7 +736,7 @@ GenerateStream::TokenCommitResult GenerateStream::commitTokenIdsWithoutLock(cons
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        result.error_token_id = error_token_id;
+        reportOutOfVocabErrorWithoutLock(error_token_id);
         return result;
     }
 
@@ -770,7 +773,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int        cur_cached_len = seqLength() - 1;
     const auto commit_result  = commitTokenIdsWithoutLock(new_tokens, num_new_tokens);
     if (!commit_result.ok) {
-        reportOutOfVocabErrorWithoutLock(commit_result.error_token_id);
         return;
     }
 
@@ -858,7 +860,6 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
     auto        num_new_tokens = update_info.num_new_tokens;
     const auto  commit_result  = commitTokenIdsWithoutLock(new_tokens, num_new_tokens);
     if (!commit_result.ok) {
-        reportOutOfVocabErrorWithoutLock(commit_result.error_token_id);
         return;
     }
 
@@ -953,11 +954,8 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
     std::vector<int> src_batch_indices_vec(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(src_batch_indices_vec.size() == currentBatchSize());
 
-    for (const auto& p : logits_processor_list_) {
-        if (!p) {
-            continue;
-        }
-        p->updateMultiSeqStatus(src_batch_indices_vec);
+    for (const auto& processor : getAllLogitsProcessorPtr()) {
+        processor->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
 
