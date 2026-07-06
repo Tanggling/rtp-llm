@@ -139,7 +139,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
     // via ResourceContext to every stream this engine creates. Avoids the previous
     // process-global backend, which would be overwritten by any other engine
     // (e.g. MTP draft executor) and could mask logits with the wrong tokenizer.
-    resource_context_.grammar_backend = XGrammarBackend::create(params.tokenizer_info, params.grammar_config);
+    resource_context_.grammar_backend =
+        XGrammarBackend::create(params.model_config_.tokenizer_info_json, params.grammar_config);
 
     if (propose_params_) {
         executor_.reset(new MtpExecutor(params,

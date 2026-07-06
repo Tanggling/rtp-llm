@@ -10,10 +10,6 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
-from rtp_llm.config.response_format_builder import (
-    ReasoningFormat,
-    ResponseFormatBuilder,
-)
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
@@ -116,12 +112,6 @@ class Pipeline(object):
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
         config.add_thinking_params(tokenizer, generate_env_config)
-        ResponseFormatBuilder(
-            config,
-            reasoning_format=ReasoningFormat.from_generate_env_config(
-                generate_env_config
-            ),
-        ).apply()
         config.add_stop_ids_from_str(tokenizer)
         return config
 

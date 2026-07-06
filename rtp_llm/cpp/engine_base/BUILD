@@ -78,7 +78,6 @@ cc_library(
         ":executor",
         ":profiler",
         ":worker_status_info",
-        "//rtp_llm/cpp/engine_base/grammar:grammar_api",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
@@ -89,5 +88,4 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
-
 

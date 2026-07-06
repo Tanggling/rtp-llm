@@ -487,7 +487,9 @@ class GenerateConfig(BaseModel):
         self.stop_words_list += special_tokens.stop_words_id_list
         self.stop_words_str += special_tokens.stop_words_str_list
 
-    def add_thinking_params(self, tokenizer, generate_env_config):
+    def add_thinking_params(
+        self, tokenizer, generate_env_config, normalize_response_format: bool = True
+    ):
         """Add thinking parameters from generate_env_config.
 
         Args:
@@ -514,6 +516,29 @@ class GenerateConfig(BaseModel):
         self.in_think_mode = (
             bool(generate_env_config.think_mode) and len(self.end_think_token_ids) >= 0
         )
+        if normalize_response_format:
+            self.apply_response_format(generate_env_config=generate_env_config)
+
+    def apply_response_format(
+        self,
+        generate_env_config: Optional[Any] = None,
+        reasoning_format: Optional[Any] = None,
+    ) -> None:
+        from rtp_llm.config.response_format_builder import (
+            ReasoningFormat,
+            ResponseFormatBuilder,
+        )
+
+        if reasoning_format is None and generate_env_config is not None:
+            reasoning_format = ReasoningFormat.from_generate_env_config(
+                generate_env_config
+            )
+        ResponseFormatBuilder(self, reasoning_format=reasoning_format).apply()
+
+    def grammar_terminate_without_stop_token(self) -> bool:
+        from rtp_llm.config.response_format_builder import ResponseFormatBuilder
+
+        return ResponseFormatBuilder.grammar_terminate_without_stop_token(self)
 
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []

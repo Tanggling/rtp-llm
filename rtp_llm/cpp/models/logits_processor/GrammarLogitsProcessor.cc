@@ -14,6 +14,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #endif
 
+#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -40,7 +41,7 @@ ErrorInfo preflightSpecVerifyRequest(const SpecLogitsProcessorRequest& request) 
     return {};
 }
 
-ErrorInfo validateSpecVerifyMatcher(GrammarMatcher& matcher, int64_t eos_token_id, size_t W) {
+ErrorInfo validateSpecVerifyMatcher(RtpGrammarMatcher& matcher, int64_t eos_token_id, size_t W) {
     const int32_t grammar_vocab_size = matcher.vocabSize();
     if (grammar_vocab_size <= 0) {
         matcher.markFinished();
@@ -65,7 +66,7 @@ ErrorInfo validateSpecVerifyMatcher(GrammarMatcher& matcher, int64_t eos_token_i
 }
 
 SpecVerifyRowState
-fillSpecVerifyRow(GrammarMatcher& matcher, int64_t eos_token_id, int32_t* row, size_t W, size_t model_vocab_size) {
+fillSpecVerifyRow(RtpGrammarMatcher& matcher, int64_t eos_token_id, int32_t* row, size_t W, size_t model_vocab_size) {
     std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
     if (matcher.finished()) {
         forceTokenInBitmask(row, W, eos_token_id);
@@ -100,7 +101,7 @@ bool specVerifyDraftTokenAllowed(const int32_t* row, size_t W, size_t vocab_size
 
 class ProvisionalSpecAcceptGuard {
 public:
-    explicit ProvisionalSpecAcceptGuard(GrammarMatcher& matcher): matcher_(matcher) {}
+    explicit ProvisionalSpecAcceptGuard(RtpGrammarMatcher& matcher): matcher_(matcher) {}
 
     void recordAccepted() {
         ++accepted_prefix_;
@@ -125,8 +126,8 @@ public:
         }
         matcher_.markFinished();
         forceTokenInBitmask(fallback_row, W, eos_token_id);
-        out_err = ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION,
-                            "grammar MTP verify exception: " + verify_exception_what_);
+        out_err =
+            ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION, "grammar MTP verify exception: " + verify_exception_what_);
         return false;
     }
 
@@ -149,12 +150,42 @@ private:
         }
     }
 
-    GrammarMatcher& matcher_;
-    int             accepted_prefix_ = 0;
-    std::string     verify_exception_what_;
+    RtpGrammarMatcher& matcher_;
+    int                accepted_prefix_ = 0;
+    std::string        verify_exception_what_;
 };
 
-int verifySpecDraftAndFillBitmask(GrammarMatcher&                   matcher,
+[[nodiscard]] int verifyDraftPrefixAndFillBitmask(RtpGrammarMatcher&                matcher,
+                                                  int64_t                           eos_token_id,
+                                                  const SpecLogitsProcessorRequest& request,
+                                                  ProvisionalSpecAcceptGuard&       provisional) {
+    const int  P = request.propose_step;
+    const auto W = request.bitmask_size_int32;
+
+    for (int offset = 0; offset <= P; ++offset) {
+        int32_t*   row       = request.bitmask_cpu_out + offset * W;
+        const auto row_state = fillSpecVerifyRow(matcher, eos_token_id, row, W, request.vocab_size);
+        if (offset == P) {
+            return P;
+        }
+        if (!specVerifyRowCanConsumeDraft(row_state)) {
+            return offset;
+        }
+
+        const int32_t draft_token = request.draft_tokens[offset];
+        if (!specVerifyDraftTokenAllowed(row, W, request.vocab_size, draft_token)) {
+            return offset;
+        }
+        if (!matcher.acceptToken(draft_token)) {
+            return offset;
+        }
+        provisional.recordAccepted();
+    }
+
+    return P;
+}
+
+int verifySpecDraftAndFillBitmask(RtpGrammarMatcher&                matcher,
                                   int64_t                           eos_token_id,
                                   const SpecLogitsProcessorRequest& request,
                                   ErrorInfo&                        out_err) {
@@ -163,7 +194,6 @@ int verifySpecDraftAndFillBitmask(GrammarMatcher&                   matcher,
         return 0;
     }
 
-    const int  P = request.propose_step;
     const auto W = request.bitmask_size_int32;
 
     if (auto err = validateSpecVerifyMatcher(matcher, eos_token_id, W); err.hasError()) {
@@ -172,31 +202,10 @@ int verifySpecDraftAndFillBitmask(GrammarMatcher&                   matcher,
     }
 
     ProvisionalSpecAcceptGuard provisional(matcher);
-    int                        cap = P;
+    int                        cap = 0;
 
     try {
-        for (int offset = 0; offset <= P; ++offset) {
-            int32_t* row       = request.bitmask_cpu_out + offset * W;
-            auto     row_state = fillSpecVerifyRow(matcher, eos_token_id, row, W, request.vocab_size);
-            if (offset == P) {
-                break;
-            }
-            if (!specVerifyRowCanConsumeDraft(row_state)) {
-                cap = offset;
-                break;
-            }
-
-            const int32_t draft_token = request.draft_tokens[offset];
-            if (!specVerifyDraftTokenAllowed(row, W, request.vocab_size, draft_token)) {
-                cap = offset;
-                break;
-            }
-            if (!matcher.acceptToken(draft_token)) {
-                cap = offset;
-                break;
-            }
-            provisional.recordAccepted();
-        }
+        cap = verifyDraftPrefixAndFillBitmask(matcher, eos_token_id, request, provisional);
     } catch (const std::exception& e) {
         provisional.captureException(e);
     } catch (...) {
@@ -213,10 +222,8 @@ int verifySpecDraftAndFillBitmask(GrammarMatcher&                   matcher,
 
 class GrammarLogitsProcessor::DecodeMaskBuilder final {
 public:
-    ErrorInfo apply(const torch::Tensor& logits,
-                    GrammarMatcher&      matcher,
-                    int64_t              accepted_token_len,
-                    int64_t              eos_token_id) {
+    ErrorInfo
+    apply(const torch::Tensor& logits, RtpGrammarMatcher& matcher, int64_t accepted_token_len, int64_t eos_token_id) {
         last_mask_device_ = logits.device();
 
         if (device_mask_state_.mode != DeviceMaskMode::UNSET && device_mask_state_.token_len == accepted_token_len
@@ -231,7 +238,7 @@ public:
         return build_err;
     }
 
-    ErrorInfo refreshAfterCommit(GrammarMatcher& matcher, int64_t accepted_token_len) {
+    ErrorInfo refreshAfterCommit(RtpGrammarMatcher& matcher, int64_t accepted_token_len) {
         ErrorInfo build_err;
         device_mask_state_ = buildState(
             last_mask_device_.value_or(c10::Device(c10::DeviceType::CPU)), matcher, accepted_token_len, build_err);
@@ -257,7 +264,7 @@ private:
     };
 
     DeviceMaskState
-    buildState(const c10::Device& device, GrammarMatcher& matcher, int64_t accepted_token_len, ErrorInfo& out_err) {
+    buildState(const c10::Device& device, RtpGrammarMatcher& matcher, int64_t accepted_token_len, ErrorInfo& out_err) {
         DeviceMaskState state;
         state.token_len = accepted_token_len;
         state.device    = device;
@@ -304,10 +311,10 @@ private:
         return reusable_bitmask_cpu_.narrow(1, 0, words);
     }
 
-    static bool fillMatcherBitmask(GrammarMatcher& matcher, const torch::Tensor& bitmask) {
+    static bool fillMatcherBitmask(RtpGrammarMatcher& matcher, const torch::Tensor& bitmask) {
         int64_t  dl_shape[2];
-        DLTensor dl = makeSingleRowBitmaskView(
-            bitmask.data_ptr<int32_t>(), static_cast<int32_t>(bitmask.size(1)), dl_shape);
+        DLTensor dl =
+            makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), static_cast<int32_t>(bitmask.size(1)), dl_shape);
         return matcher.fillBitmask(&dl, 0);
     }
 
@@ -344,9 +351,7 @@ private:
 #endif
     }
 
-    static void applyDeviceMaskState(const torch::Tensor& logits,
-                                     const DeviceMaskState& state,
-                                     int64_t eos_token_id) {
+    static void applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state, int64_t eos_token_id) {
         switch (state.mode) {
             case DeviceMaskMode::UNSET:
             case DeviceMaskMode::NOOP:
@@ -397,7 +402,7 @@ private:
     int32_t                    reusable_mask_words_ = 0;
 };
 
-GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<GrammarMatcher> matcher, int64_t eos_token_id):
+GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id):
     matcher_(std::move(matcher)),
     eos_token_id_(eos_token_id),
     decode_mask_builder_(std::make_unique<DecodeMaskBuilder>()) {}

@@ -335,7 +335,7 @@ class ServerArgsGrammarConfigTest(TestCase):
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
         self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, -1)
+        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
 
     def test_grammar_cmd_args(self):
         """Every CLI flag binds to the right config field, with correct types."""

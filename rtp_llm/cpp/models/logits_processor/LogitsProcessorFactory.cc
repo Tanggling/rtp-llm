@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/engine_base/grammar/GrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -53,17 +52,19 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
 
 // Compile + matcher creation, given an already-resolved GrammarKeyCpp. On any
 // failure returns a non-ok ErrorResult with a user-facing grammar error.
-ErrorResult<std::shared_ptr<GrammarMatcher>>
+ErrorResult<std::shared_ptr<RtpGrammarMatcher>>
 compileMatcherFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool terminate_without_stop_token) {
-    CompileResult result = backend.compile(key);
-    if (!result.compiled) {
-        const std::string err = result.error_message.empty() ? "unknown compile error" : result.error_message;
+    auto compiled_or = backend.compile(key);
+    if (!compiled_or.ok()) {
+        const std::string err = compiled_or.status().message().empty() ? "unknown compile error" :
+                                                                         std::string(compiled_or.status().message());
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + err);
     }
+    auto compiled = compiled_or.value();
 
-    std::shared_ptr<GrammarMatcher> matcher;
+    std::shared_ptr<RtpGrammarMatcher> matcher;
     try {
-        matcher = backend.createMatcher(result.compiled, terminate_without_stop_token);
+        matcher = backend.createMatcher(std::move(compiled), terminate_without_stop_token);
     } catch (const std::exception& e) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("grammar matcher install failed: ") + e.what());
     }
@@ -99,7 +100,7 @@ ErrorResult<BaseLogitsProcessorPtr> createGrammarProcessor(const std::shared_ptr
     if (!matcher_or.ok()) {
         return matcher_or.status();
     }
-    std::shared_ptr<GrammarMatcher> matcher = std::move(matcher_or.value());
+    std::shared_ptr<RtpGrammarMatcher> matcher = std::move(matcher_or.value());
     return BaseLogitsProcessorPtr(std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id));
 }
 
@@ -132,7 +133,8 @@ LogitsProcessorFactory::createLogitsProcessors(const std::shared_ptr<XGrammarBac
                              "grammar-constrained decoding does not support beam search or "
                              "num_return_sequences > 1");
         }
-        auto grammar_processor_result = createGrammarProcessor(grammar_backend, generate_input, grammar_key, eos_token_id);
+        auto grammar_processor_result =
+            createGrammarProcessor(grammar_backend, generate_input, grammar_key, eos_token_id);
         if (!grammar_processor_result.ok()) {
             return grammar_processor_result.status();
         }

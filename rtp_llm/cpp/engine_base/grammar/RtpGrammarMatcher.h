@@ -5,15 +5,14 @@
 #include <optional>
 #include <vector>
 
+#include <dlpack/dlpack.h>
 #include <xgrammar/compiler.h>
 #include <xgrammar/matcher.h>
-
-#include "rtp_llm/cpp/engine_base/grammar/GrammarMatcher.h"
 
 namespace rtp_llm {
 
 // Per-stream xgrammar::GrammarMatcher adapter.
-class RtpGrammarMatcher final: public GrammarMatcher {
+class RtpGrammarMatcher final {
 public:
     RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                       std::optional<std::vector<int32_t>>        override_stop_tokens         = std::nullopt,
@@ -25,25 +24,25 @@ public:
     RtpGrammarMatcher(RtpGrammarMatcher&&)                 = default;
     RtpGrammarMatcher& operator=(RtpGrammarMatcher&&)      = default;
 
-    [[nodiscard]] bool acceptToken(int32_t token_id) override;
-    [[nodiscard]] bool acceptTokens(const std::vector<int32_t>& tokens) override;
+    [[nodiscard]] bool acceptToken(int32_t token_id);
+    [[nodiscard]] bool acceptTokens(const std::vector<int32_t>& tokens);
 
-    bool fillBitmask(DLTensor* bitmask, int32_t idx) override;
+    bool fillBitmask(DLTensor* bitmask, int32_t idx);
 
-    bool isTerminated() const override;
-    void rollback(int n) override;
+    bool isTerminated() const;
+    void rollback(int n);
 
-    int64_t numAcceptedTokens() const override {
+    int64_t numAcceptedTokens() const {
         return num_accepted_;
     }
-    int32_t vocabSize() const override {
+    int32_t vocabSize() const {
         return compiled_->GetTokenizerInfo().GetVocabSize();
     }
 
-    void markFinished() override {
+    void markFinished() {
         finished_ = true;
     }
-    bool finished() const override {
+    bool finished() const {
         return finished_;
     }
 

@@ -1,15 +1,15 @@
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, TypeAlias
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
-GRAMMAR_FIELD_NAMES = (
+GrammarFieldName: TypeAlias = Literal[
     "json_schema",
     "regex",
     "ebnf",
     "structural_tag",
-)
+]
 
 
 def dump_compact_json(value: Any) -> str:
@@ -28,7 +28,7 @@ def load_json_field(name: str, value: Any) -> Any:
         )
 
 
-def normalize_grammar_value(name: str, value: Any) -> Any:
+def normalize_grammar_value(name: GrammarFieldName, value: Any) -> Any:
     if name in ("json_schema", "structural_tag") and isinstance(value, dict):
         return dump_compact_json(value)
     return value
@@ -36,10 +36,9 @@ def normalize_grammar_value(name: str, value: Any) -> Any:
 
 def has_bounded_region(node: Any) -> bool:
     if isinstance(node, dict):
-        if (
-            node.get("type") in ("any_text", "any_tokens")
-            and node.get("max_tokens") is not None
-        ):
+        node_type = node["type"] if "type" in node else None
+        max_tokens = node["max_tokens"] if "max_tokens" in node else None
+        if node_type in ("any_text", "any_tokens") and max_tokens is not None:
             return True
         return any(has_bounded_region(value) for value in node.values())
     if isinstance(node, list):
@@ -51,7 +50,7 @@ def has_bounded_region(node: Any) -> bool:
 class GrammarConstraint:
     """Canonical one-of grammar constraint before it is written to GenerateConfig fields."""
 
-    name: str
+    name: GrammarFieldName
     value: Any
 
     @classmethod
@@ -78,10 +77,14 @@ class GrammarConstraint:
     @classmethod
     def collect_from_config(cls, config: Any) -> List["GrammarConstraint"]:
         constraints = []
-        for name in GRAMMAR_FIELD_NAMES:
-            value = getattr(config, name)
-            if value is not None:
-                constraints.append(cls(name, value))
+        if config.json_schema is not None:
+            constraints.append(cls("json_schema", config.json_schema))
+        if config.regex is not None:
+            constraints.append(cls("regex", config.regex))
+        if config.ebnf is not None:
+            constraints.append(cls("ebnf", config.ebnf))
+        if config.structural_tag is not None:
+            constraints.append(cls("structural_tag", config.structural_tag))
         return constraints
 
     def normalized(self) -> "GrammarConstraint":
@@ -96,48 +99,42 @@ class GrammarConstraint:
                 f"{self.name} must not be empty",
             )
 
-    def as_config_update(self) -> Dict[str, Any]:
-        values: Dict[str, Any] = {
-            "json_schema": None,
-            "regex": None,
-            "ebnf": None,
-            "structural_tag": None,
-        }
-        normalized = self.normalized()
-        values[normalized.name] = normalized.value
-        return values
+    def _json_schema_format_node(self) -> Dict[str, Any]:
+        schema: Any
+        if self.value == "$$ANY$$":
+            schema = True
+        else:
+            schema = load_json_field("json_schema", self.value)
+        if not isinstance(schema, (dict, bool)):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "json_schema must be a JSON object or boolean",
+            )
+        return {"type": "json_schema", "json_schema": schema, "style": "json"}
 
-    def final_format_node(self) -> Dict[str, Any]:
-        if self.name == "json_schema":
-            schema: Any
-            if self.value == "$$ANY$$":
-                schema = True
-            else:
-                schema = load_json_field("json_schema", self.value)
-            if not isinstance(schema, (dict, bool)):
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "json_schema must be a JSON object or boolean",
-                )
-            return {"type": "json_schema", "json_schema": schema, "style": "json"}
-        if self.name == "regex":
-            return {"type": "regex", "pattern": self.value}
-        if self.name == "ebnf":
-            return {"type": "grammar", "grammar": self.value}
+    def _structural_tag_format_node(self) -> Dict[str, Any]:
         structural_tag = load_json_field("structural_tag", self.value)
         if not isinstance(structural_tag, dict):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "structural_tag must be a JSON object",
             )
-        format_node = structural_tag.get("format")
-        if structural_tag.get("type") != "structural_tag" or not isinstance(
-            format_node, dict
+
+        if "type" not in structural_tag or structural_tag["type"] != "structural_tag":
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "structural_tag must have type='structural_tag' and a format object",
+            )
+
+        if "format" not in structural_tag or not isinstance(
+            structural_tag["format"], dict
         ):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "structural_tag must have type='structural_tag' and a format object",
             )
+
+        format_node = structural_tag["format"]
         if has_bounded_region(format_node):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
@@ -145,3 +142,17 @@ class GrammarConstraint:
                 "already contains any_text/any_tokens max_tokens",
             )
         return format_node
+
+    def final_format_node(self) -> Dict[str, Any]:
+        if self.name == "json_schema":
+            return self._json_schema_format_node()
+        if self.name == "regex":
+            return {"type": "regex", "pattern": self.value}
+        if self.name == "ebnf":
+            return {"type": "grammar", "grammar": self.value}
+        if self.name == "structural_tag":
+            return self._structural_tag_format_node()
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            f"unsupported grammar field {self.name}",
+        )

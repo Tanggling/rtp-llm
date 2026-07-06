@@ -61,6 +61,7 @@ cc_library(
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
+        "logits_processor/BitmaskUtils.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",

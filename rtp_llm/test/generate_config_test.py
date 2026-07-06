@@ -580,7 +580,11 @@ class ResponseFormatProjectionTest(TestCase):
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = think_end_token_id
         generate_env_config.think_end_tag = think_end_tag
-        cfg.add_thinking_params(None, generate_env_config)
+        cfg.add_thinking_params(
+            None,
+            generate_env_config,
+            normalize_response_format=False,
+        )
         return ReasoningFormat.from_generate_env_config(generate_env_config)
 
     def test_response_format_projected_to_typed_grammar_field(self):

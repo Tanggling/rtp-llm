@@ -305,16 +305,18 @@ class BaseModel(object):
         if real_tokenizer is None:
             return
 
-        backend_tokenizer = getattr(real_tokenizer, "backend_tokenizer", None)
-        if not hasattr(real_tokenizer, "get_vocab") or not hasattr(
-            backend_tokenizer, "to_str"
-        ):
-            message = "Tokenizer does not expose HuggingFace backend info"
-            logging.warning(message)
-            raise RuntimeError(message)
+        try:
+            import xgrammar as xgr
 
-        self.model_config.tokenizer_vocab = real_tokenizer.get_vocab()
-        self.model_config.tokenizer_backend_str = backend_tokenizer.to_str()
+            tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+                real_tokenizer,
+                vocab_size=self.model_config.vocab_size or None,
+            )
+            self.model_config.tokenizer_info_json = tokenizer_info.serialize_json()
+        except Exception as e:
+            message = f"Failed to build xgrammar TokenizerInfo from tokenizer: {e}"
+            logging.warning(message)
+            raise RuntimeError(message) from e
 
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal

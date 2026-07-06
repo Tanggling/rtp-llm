@@ -10,14 +10,15 @@
 
 #include <ATen/ATen.h>
 
-#include "rtp_llm/cpp/engine_base/grammar/GrammarMatcher.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
 namespace rtp_llm {
 
+class RtpGrammarMatcher;
+
 class GrammarLogitsProcessor final: public SpecLogitsProcessor {
 public:
-    explicit GrammarLogitsProcessor(std::shared_ptr<GrammarMatcher> matcher, int64_t eos_token_id = 0);
+    explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id = 0);
 
     ~GrammarLogitsProcessor() override;
 
@@ -63,7 +64,7 @@ private:
 
     void acceptCommittedLocked(const int32_t* tokens, size_t n, ErrorInfo& out_err);
 
-    std::shared_ptr<GrammarMatcher>    matcher_;
+    std::shared_ptr<RtpGrammarMatcher> matcher_;
     int64_t                            eos_token_id_       = 0;
     int64_t                            accepted_token_len_ = 0;
     std::unique_ptr<DecodeMaskBuilder> decode_mask_builder_;

@@ -13,6 +13,8 @@
 #include <xgrammar/matcher.h>
 #include <xgrammar/tokenizer_info.h>
 
+#include "absl/status/status.h"
+
 namespace rtp_llm {
 namespace {
 
@@ -43,14 +45,22 @@ TEST(XGrammarBackendTest, ConstructFromDirectTokenizerInfo) {
     EXPECT_TRUE(backend.isEnabled());
 }
 
+TEST(XGrammarBackendTest, CreateFromSerializedTokenizerInfo) {
+    GrammarConfig cfg;
+    cfg.num_workers = 2;
+
+    auto backend = XGrammarBackend::create(makeTokenizerInfo().SerializeJSON(), cfg);
+    ASSERT_TRUE(backend);
+    EXPECT_TRUE(backend->isEnabled());
+}
+
 TEST(XGrammarBackendTest, CompileBuiltinJSONViaSentinel) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
 
     GrammarKeyCpp key{"json", "$$ANY$$"};
     auto          result = backend.compile(key);
-    ASSERT_TRUE(result.compiled) << "$$ANY$$ should map to builtin JSON grammar";
-    EXPECT_FALSE(result.is_invalid);
-    EXPECT_GT(result.compiled->MemorySizeBytes(), 0u);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    EXPECT_GT(result.value()->MemorySizeBytes(), 0u);
 }
 
 TEST(XGrammarBackendTest, CompileSimpleJsonSchema) {
@@ -58,20 +68,18 @@ TEST(XGrammarBackendTest, CompileSimpleJsonSchema) {
     GrammarKeyCpp   key{"json", R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})"};
 
     auto result = backend.compile(key);
-    ASSERT_TRUE(result.compiled);
-    EXPECT_FALSE(result.is_invalid);
-    EXPECT_TRUE(result.error_message.empty());
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
 }
 
 TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
-    // Malformed JSON must surface as cacheable is_invalid, not throw.
+    // Malformed JSON must surface as a user-input status, not throw.
     GrammarKeyCpp key{"json", "{this is not json at all"};
 
     auto result = backend.compile(key);
-    EXPECT_FALSE(result.compiled);
-    EXPECT_TRUE(result.is_invalid);
-    EXPECT_FALSE(result.error_message.empty());
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_FALSE(result.status().message().empty());
 }
 
 TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyText) {
@@ -82,9 +90,7 @@ TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyText) {
                         R"({"type":"regex","pattern":"a"}]}})"};
 
     auto result = backend.compile(key);
-    ASSERT_TRUE(result.compiled);
-    EXPECT_FALSE(result.is_invalid);
-    EXPECT_TRUE(result.error_message.empty());
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
 }
 
 TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyTextTokenEnd) {
@@ -96,9 +102,7 @@ TEST(XGrammarBackendTest, CompileStructuralTagWithBoundedAnyTextTokenEnd) {
                         R"({"type":"regex","pattern":"a"}]}})"};
 
     auto result = backend.compile(key);
-    ASSERT_TRUE(result.compiled);
-    EXPECT_FALSE(result.is_invalid);
-    EXPECT_TRUE(result.error_message.empty());
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
 }
 
 TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
@@ -109,17 +113,17 @@ TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
                         R"({"type":"any_text","max_tokens":1}]}})"};
 
     auto result = backend.compile(key);
-    EXPECT_FALSE(result.compiled);
-    EXPECT_TRUE(result.is_invalid);
-    EXPECT_FALSE(result.error_message.empty());
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_FALSE(result.status().message().empty());
 }
 
 TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     auto            result = backend.compile({"json", "$$ANY$$"});
-    ASSERT_TRUE(result.compiled);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
 
-    auto matcher = backend.createMatcher(result.compiled);
+    auto matcher = backend.createMatcher(result.value());
     ASSERT_TRUE(matcher);
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
     EXPECT_FALSE(matcher->isTerminated());
@@ -130,9 +134,9 @@ TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
 TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
     XGrammarBackend backend(makeTokenizerInfo(), defaultOptions());
     auto            result = backend.compile({"regex", "a"});
-    ASSERT_TRUE(result.compiled);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
 
-    auto          matcher = backend.createMatcher(result.compiled);
+    auto          matcher = backend.createMatcher(result.value());
     constexpr int kA      = 'a';
     EXPECT_TRUE(matcher->acceptToken(kA));
     EXPECT_EQ(matcher->numAcceptedTokens(), 1);

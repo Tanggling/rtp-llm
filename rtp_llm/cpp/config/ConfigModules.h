@@ -362,7 +362,7 @@ struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     int  num_workers                             = 8;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
-    int64_t compiler_cache_bytes = -1;
+    int64_t compiler_cache_bytes = 512 * 1024 * 1024;
 };
 
 struct RuntimeConfig {

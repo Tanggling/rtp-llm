@@ -10,12 +10,12 @@
 #include <xgrammar/grammar.h>
 #include <xgrammar/tokenizer_info.h>
 
+#include "absl/status/statusor.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
 class RtpGrammarMatcher;
-class TokenizerInfo;
 
 // Grammar request key shared by scheduler and backend.
 struct GrammarKeyCpp {
@@ -32,14 +32,6 @@ struct GrammarKeyCpp {
     std::string brief() const {
         return key_type + "(len=" + std::to_string(key_string.size()) + ")";
     }
-};
-
-// (compiled != null) ok; is_invalid means user-facing grammar rejection; otherwise
-// this is a retryable/system error.
-struct CompileResult {
-    std::shared_ptr<xgrammar::CompiledGrammar> compiled;
-    bool                                       is_invalid = false;
-    std::string                                error_message;
 };
 
 struct XGrammarBackendOptions {
@@ -61,15 +53,16 @@ public:
     XGrammarBackend(const XGrammarBackend&)            = delete;
     XGrammarBackend& operator=(const XGrammarBackend&) = delete;
 
-    // Returns nullptr (not throw) when tokenizer is empty / build fails.
-    static std::shared_ptr<XGrammarBackend> create(const TokenizerInfo& tokenizer_info,
+    // Returns nullptr (not throw) when tokenizer info is empty / invalid / build fails.
+    static std::shared_ptr<XGrammarBackend> create(const std::string&   tokenizer_info_json,
                                                    const GrammarConfig& cfg) noexcept;
 
     // True iff the tokenizer is non-empty so the backend can compile / mask grammars.
     bool isEnabled() const noexcept;
 
     // Synchronous; cache and concurrent same-key races are handled inside xgrammar::GrammarCompiler.
-    CompileResult compile(const GrammarKeyCpp& key);
+    // InvalidArgument means user-facing grammar rejection; other failures are system/retryable.
+    absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> compile(const GrammarKeyCpp& key);
 
     std::shared_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                                      bool terminate_without_stop_token = false);

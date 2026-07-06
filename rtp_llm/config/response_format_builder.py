@@ -6,7 +6,6 @@ from pydantic import ValidationError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import (
-    GRAMMAR_FIELD_NAMES,
     GrammarConstraint,
     dump_compact_json,
     has_bounded_region,
@@ -31,12 +30,9 @@ class ReasoningFormat:
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
-        raw_tag = (
-            getattr(generate_env_config, "think_end_tag", DEFAULT_THINK_END_TAG)
-            or DEFAULT_THINK_END_TAG
-        )
+        raw_tag = generate_env_config.think_end_tag or DEFAULT_THINK_END_TAG
         tag = cls.decode_env_tag(str(raw_tag))
-        raw_token_id = getattr(generate_env_config, "think_end_token_id", -1)
+        raw_token_id = generate_env_config.think_end_token_id
         token_id = -1 if raw_token_id is None else int(raw_token_id)
         if token_id != -1:
             return cls(tag_end={"type": "token", "token": int(token_id)})
@@ -122,36 +118,50 @@ class ResponseFormatBuilder:
         if rf is None:
             return
 
-        self._clear_grammar_fields()
         constraint = GrammarConstraint.from_response_format(rf)
-        if constraint is not None:
-            self._apply_constraint(constraint)
-
         self.config.response_format = None
+        self.config.json_schema = None
+        self.config.regex = None
+        self.config.ebnf = None
+        self.config.structural_tag = None
+
+        if constraint is None:
+            return
+
+        normalized = constraint.normalized()
+        if normalized.name == "json_schema":
+            self.config.json_schema = normalized.value
+        elif normalized.name == "regex":
+            self.config.regex = normalized.value
+        elif normalized.name == "ebnf":
+            self.config.ebnf = normalized.value
+        elif normalized.name == "structural_tag":
+            self.config.structural_tag = normalized.value
+        else:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"unsupported grammar field {normalized.name}",
+            )
 
     def _resolve_grammar_constraint(self) -> Optional[GrammarConstraint]:
         self._project_response_format_to_grammar_fields()
-        self._normalize_grammar_fields()
+        if self.config.json_schema is not None:
+            self.config.json_schema = normalize_grammar_value(
+                "json_schema", self.config.json_schema
+            )
+        if self.config.regex is not None:
+            self.config.regex = normalize_grammar_value("regex", self.config.regex)
+        if self.config.ebnf is not None:
+            self.config.ebnf = normalize_grammar_value("ebnf", self.config.ebnf)
+        if self.config.structural_tag is not None:
+            self.config.structural_tag = normalize_grammar_value(
+                "structural_tag", self.config.structural_tag
+            )
         constraints = GrammarConstraint.collect_from_config(self.config)
         self._validate_grammar_constraints(constraints)
         if not constraints:
             return None
         return constraints[0]
-
-    def _clear_grammar_fields(self) -> None:
-        for name in GRAMMAR_FIELD_NAMES:
-            setattr(self.config, name, None)
-
-    def _apply_constraint(self, constraint: GrammarConstraint) -> None:
-        for name, value in constraint.as_config_update().items():
-            setattr(self.config, name, value)
-
-    def _normalize_grammar_fields(self) -> None:
-        """Normalize grammar fields before they cross backend/RPC boundaries."""
-        for name in GRAMMAR_FIELD_NAMES:
-            value = getattr(self.config, name)
-            if value is not None:
-                setattr(self.config, name, normalize_grammar_value(name, value))
 
     def _validate_grammar_constraints(
         self, constraints: List[GrammarConstraint]

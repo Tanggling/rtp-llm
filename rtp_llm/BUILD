@@ -129,6 +129,7 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
+    "xgrammar",
     "pybind11_stubgen",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
@@ -245,6 +246,7 @@ py_library(
         ":sentencepiece",
         ":sentence-transformers",
         ":transformers",
+        ":xgrammar",
         ":prettytable",
         ":pynvml",
         ":tiktoken",
@@ -621,6 +623,7 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
+    "xgrammar==0.2.3",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
