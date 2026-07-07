@@ -24,34 +24,15 @@ class ReasoningFormat:
     tag_end: Union[str, List[str], Dict[str, Any]] = DEFAULT_THINK_END_TAG
     suffix: str = ""
 
-    @staticmethod
-    def decode_env_tag(tag: str) -> str:
-        return tag.encode("utf-8").decode("unicode_escape")
-
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
         raw_tag = generate_env_config.think_end_tag or DEFAULT_THINK_END_TAG
-        tag = cls.decode_env_tag(str(raw_tag))
+        tag = str(raw_tag).encode("utf-8").decode("unicode_escape")
         raw_token_id = generate_env_config.think_end_token_id
         token_id = -1 if raw_token_id is None else int(raw_token_id)
         if token_id != -1:
             return cls(tag_end={"type": "token", "token": int(token_id)})
         return cls(tag_end=tag)
-
-    def token_end_id(self) -> Optional[int]:
-        if not isinstance(self.tag_end, dict):
-            return None
-        if self.tag_end.get("type") != "token":
-            return None
-        token = self.tag_end.get("token")
-        if isinstance(token, bool) or not isinstance(token, int):
-            return None
-        return int(token)
-
-    def stop_text(self) -> Optional[str]:
-        if not isinstance(self.tag_end, str):
-            return None
-        return self.tag_end + self.suffix
 
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
         think_tag = {
@@ -87,7 +68,7 @@ class ResponseFormatBuilder:
         if not self.config.in_think_mode:
             return
 
-        if self._reasoning_envelope_final_is_json() is not None:
+        if self._existing_reasoning_envelope_final_format() is not None:
             return
 
         if constraint is not None:
@@ -97,8 +78,10 @@ class ResponseFormatBuilder:
     def grammar_terminate_without_stop_token(cls, config: Any) -> bool:
         if config.json_schema is not None:
             return True
-        final_is_json = cls(config)._reasoning_envelope_final_is_json()
-        return final_is_json is True
+        final_format = cls(config)._existing_reasoning_envelope_final_format()
+        return (
+            final_format is not None and final_format.get("type") == "json_schema"
+        )
 
     def _project_response_format_to_grammar_fields(self) -> None:
         """Project response_format onto typed fields and clear it; rf wins over stale extra_configs grammar."""
@@ -186,7 +169,8 @@ class ResponseFormatBuilder:
                 "(num_beams > 1 or num_return_sequences > 1)",
             )
 
-    def _reasoning_envelope_final_is_json(self) -> Optional[bool]:
+    def _existing_reasoning_envelope_final_format(self) -> Optional[Dict[str, Any]]:
+        """Return final output format if structural_tag is already reasoning-wrapped."""
         if self.config.structural_tag is None:
             return None
         structural_tag = load_json_field("structural_tag", self.config.structural_tag)
@@ -200,47 +184,34 @@ class ResponseFormatBuilder:
         elements = format_node.get("elements")
         if not isinstance(elements, list):
             return None
-        final_format = self._extract_reasoning_envelope_final_format(elements)
-        if final_format is None:
+        if len(elements) not in (2, 3):
             return None
-        return final_format.get("type") == "json_schema"
 
-    @classmethod
-    def _extract_reasoning_envelope_final_format(
-        cls, elements: list[Any]
-    ) -> Optional[Dict[str, Any]]:
-        if len(elements) < 2 or not cls._looks_like_reasoning_think_tag(elements[0]):
+        reasoning_prefix = elements[0]
+        if not isinstance(reasoning_prefix, dict):
             return None
-        final_index = 1
+        content = reasoning_prefix.get("content")
         if (
-            len(elements) >= 3
-            and isinstance(elements[1], dict)
-            and elements[1].get("type") == "const_string"
+            reasoning_prefix.get("type") != "tag"
+            or reasoning_prefix.get("begin") != ""
+            or not isinstance(content, dict)
+            or content.get("type") != "any_text"
+            or content.get("max_tokens") is None
+            or "end" not in reasoning_prefix
         ):
-            final_index = 2
-        if len(elements) != final_index + 1:
             return None
-        final_format = elements[final_index]
-        if not isinstance(final_format, dict):
-            return None
-        if has_bounded_region(final_format):
+
+        if len(elements) == 3:
+            suffix = elements[1]
+            if not isinstance(suffix, dict) or suffix.get("type") != "const_string":
+                return None
+            final_format = elements[2]
+        else:
+            final_format = elements[1]
+
+        if not isinstance(final_format, dict) or has_bounded_region(final_format):
             return None
         return final_format
-
-    @staticmethod
-    def _looks_like_reasoning_think_tag(node: Any) -> bool:
-        if not isinstance(node, dict):
-            return False
-        if node.get("type") != "tag" or node.get("begin") != "":
-            return False
-        content = node.get("content")
-        if not isinstance(content, dict):
-            return False
-        return (
-            content.get("type") == "any_text"
-            and content.get("max_tokens") is not None
-            and "end" in node
-        )
 
     def _wrap_grammar_with_reasoning_envelope(
         self, constraint: GrammarConstraint
