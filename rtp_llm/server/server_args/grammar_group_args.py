@@ -18,8 +18,8 @@ def init_grammar_group_args(parser, grammar_config):
         type=int,
         default=grammar_config.num_workers,
         help=(
-            "Forwarded to xgrammar's GrammarCompiler as max_compiler_threads, "
-            "which parallelizes FSM construction (NFA→DFA) within a single "
+            "Forwarded to the grammar compiler as max_compiler_threads, "
+            "which parallelizes FSM construction (NFA->DFA) within a single "
             "compile. This knob affects intra-compile parallelism, not request-level "
             "concurrency. Raise "
             "for large/complex schemas; C++ clamps invalid values to at least 1."
@@ -32,7 +32,7 @@ def init_grammar_group_args(parser, grammar_config):
         type=int,
         default=grammar_config.compiler_cache_bytes,
         help=(
-            "Byte cap on xgrammar's internal compiled-grammar cache. Set <=0 "
+            "Byte cap on the internal compiled-grammar cache. Set <=0 "
             "for unlimited."
         ),
     )

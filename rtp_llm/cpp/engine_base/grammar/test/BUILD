@@ -14,6 +14,7 @@ cc_test(
     srcs = ["XGrammarBackendTest.cc"],
     deps = test_deps + [
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/engine_base/grammar:xgrammar_tokenizer_info",
     ],
     copts = copts() + ["-fno-access-control"],
 )

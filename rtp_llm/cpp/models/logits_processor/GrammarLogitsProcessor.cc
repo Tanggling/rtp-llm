@@ -168,27 +168,27 @@ private:
             return row_state.status();
         }
         if (offset == P) {
-            return P;
+            return int(P);
         }
         if (!specVerifyRowCanConsumeDraft(row_state.value())) {
-            return offset;
+            return int(offset);
         }
 
         const int32_t draft_token = request.draft_tokens[offset];
         if (!specVerifyDraftTokenAllowed(row, W, request.vocab_size, draft_token)) {
-            return offset;
+            return int(offset);
         }
         auto accepted = matcher.acceptToken(draft_token);
         if (!accepted.ok()) {
             return accepted.status();
         }
         if (!accepted.value()) {
-            return offset;
+            return int(offset);
         }
         provisional.recordAccepted();
     }
 
-    return P;
+    return int(P);
 }
 
 ErrorResult<int> verifySpecDraftAndFillBitmask(RtpGrammarMatcher&                matcher,
@@ -217,7 +217,7 @@ ErrorResult<int> verifySpecDraftAndFillBitmask(RtpGrammarMatcher&               
     if (rollback_err.hasError()) {
         return rollback_err;
     }
-    return cap.value();
+    return int(cap.value());
 }
 
 }  // namespace

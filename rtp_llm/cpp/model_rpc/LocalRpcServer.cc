@@ -117,7 +117,10 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
-    // isActive()==false conflates clean finish with async-reported errors arriving post-loop.
+    // Loop exit only means the stream is inactive and has no buffered output. It does not
+    // distinguish clean finish from errors reported after the last output was consumed, e.g.
+    // grammar/logits-processor errors. Convert those deferred stream errors to gRPC errors
+    // here; otherwise the client would receive OK and treat the failed request as success.
     if (stream->hasError()) {
         return serializeErrorMsg(request_key, stream->statusInfo());
     }
@@ -155,7 +158,9 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
         }
         last_outputs = output_result.value();
     }
-    // Mirrors pollStreamOutput: catch async errors that surface after the loop exits.
+    // Same as pollStreamOutput: after draining outputs, the stream may still carry a deferred
+    // error reported by the engine or a logits processor. Return it so batch results use
+    // error_info instead of final_output.
     if (stream->hasError()) {
         return stream->statusInfo();
     }

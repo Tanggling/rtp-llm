@@ -1,12 +1,15 @@
 // XGrammarBackend + RtpGrammarMatcher unit tests (native-C++ path, no Python).
 
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarTokenizerInfo.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <xgrammar/compiler.h>
@@ -52,6 +55,42 @@ TEST(XGrammarBackendTest, CreateFromSerializedTokenizerInfo) {
     auto backend = XGrammarBackend::create(makeTokenizerInfo().SerializeJSON(), cfg);
     ASSERT_TRUE(backend);
     EXPECT_TRUE(backend->isEnabled());
+}
+
+TEST(XGrammarTokenizerInfoTest, SerializesTokenizerInfoFromPreparedHFData) {
+    const std::vector<std::string> encoded_vocab{"A", "<0x20>", "B", "", ""};
+    const std::string              tokenizer_metadata_json =
+        R"({"vocab_size":5,"stop_token_ids":[2],"hf_tokenizer_json":"{\"decoder\":{\"type\":\"Sequence\",\"decoders\":[{\"type\":\"ByteFallback\"}]},\"normalizer\":{\"type\":\"Prepend\",\"prepend\":\"\\u2581\"}}"})";
+    const std::string opaque = xgrammar_impl::serializeTokenizerInfo(encoded_vocab, tokenizer_metadata_json);
+    auto result = xgrammar::TokenizerInfo::DeserializeJSON(opaque);
+    ASSERT_TRUE(std::holds_alternative<xgrammar::TokenizerInfo>(result));
+
+    const auto& tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
+    EXPECT_EQ(tokenizer_info.GetVocabType(), xgrammar::VocabType::BYTE_FALLBACK);
+    EXPECT_EQ(tokenizer_info.GetVocabSize(), 5);
+    EXPECT_TRUE(tokenizer_info.GetAddPrefixSpace());
+    EXPECT_EQ(tokenizer_info.GetStopTokenIds(), std::vector<int32_t>{2});
+    EXPECT_EQ(tokenizer_info.GetDecodedVocab()[1], " ");
+
+    const auto& special_token_ids = tokenizer_info.GetSpecialTokenIds();
+    EXPECT_NE(std::find(special_token_ids.begin(), special_token_ids.end(), 3), special_token_ids.end());
+    EXPECT_NE(std::find(special_token_ids.begin(), special_token_ids.end(), 4), special_token_ids.end());
+}
+
+TEST(XGrammarTokenizerInfoTest, SerializesTokenizerInfoFromExplicitParams) {
+    const std::vector<std::string> encoded_vocab{"A", "B", ""};
+    const std::string              tokenizer_metadata_json =
+        R"({"vocab_size":3,"stop_token_ids":[1],"vocab_type":"RAW","add_prefix_space":false})";
+    const std::string              opaque =
+        xgrammar_impl::serializeTokenizerInfo(encoded_vocab, tokenizer_metadata_json);
+    auto result = xgrammar::TokenizerInfo::DeserializeJSON(opaque);
+    ASSERT_TRUE(std::holds_alternative<xgrammar::TokenizerInfo>(result));
+
+    const auto& tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
+    EXPECT_EQ(tokenizer_info.GetVocabType(), xgrammar::VocabType::RAW);
+    EXPECT_EQ(tokenizer_info.GetVocabSize(), 3);
+    EXPECT_FALSE(tokenizer_info.GetAddPrefixSpace());
+    EXPECT_EQ(tokenizer_info.GetStopTokenIds(), std::vector<int32_t>{1});
 }
 
 TEST(XGrammarBackendTest, CompileBuiltinJSONViaSentinel) {

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <exception>
@@ -102,6 +103,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
             reportErrorWithoutLock(err.code(), err.ToString());
         } else {
             logits_processor_list_ = std::move(factory_result.value());
+            // Keep stream-owned processors non-null so later update/poll loops can dereference directly.
+            logits_processor_list_.erase(std::remove(logits_processor_list_.begin(), logits_processor_list_.end(), nullptr),
+                                         logits_processor_list_.end());
         }
     }
 
@@ -757,7 +761,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
-    // Drain processor errors stashed during the prior sampler tick (off-stream-mutex).
+    // Spec verify processors may have recorded an error while masking logits in the previous
+    // sampler tick, before this stream update reacquires the stream mutex. Promote that processor
+    // error to the stream state before accepting the verified target/draft tokens.
     pollLogitsProcessorErrors();
     if (hasError() && !update_info.force_update_info) {
         return;
@@ -850,7 +856,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
-    // Drain processor errors stashed during the prior sampler tick (off-stream-mutex).
+    // Logits processors run during sampling and store errors on themselves instead of throwing
+    // through the sampler path. Poll at the update boundary so a processor failure becomes a
+    // stream error before we commit sampled tokens or publish output.
     pollLogitsProcessorErrors();
     if (hasError() && !update_info.force_update_info) {
         return;
@@ -918,8 +926,10 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
 }
 
 bool GenerateStream::hasStatefulLogitsProcessor() const {
+    // Stateful processors, e.g. grammar constraints, remember accepted tokens across decode steps.
+    // Their internal state must be advanced whenever this stream commits output tokens.
     for (const auto& p : logits_processor_list_) {
-        if (p && p->isStateful()) {
+        if (p->isStateful()) {
             return true;
         }
     }
@@ -928,8 +938,10 @@ bool GenerateStream::hasStatefulLogitsProcessor() const {
 
 int64_t GenerateStream::processorAcceptedTokenLen() const {
     int64_t accepted_token_len = -1;
+    // All stateful processors must agree on how many output tokens they have accepted.
+    // A mismatch means the stream and processor state diverged, so later masks may be built from stale state.
     for (const auto& p : logits_processor_list_) {
-        if (!p || !p->isStateful()) {
+        if (!p->isStateful()) {
             continue;
         }
         const auto processor_token_len = p->committedOutputLen();
@@ -981,16 +993,18 @@ void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
         return;
     }
 
+    // Notify processors about newly committed tokens so token-dependent constraints observe the same sequence
+    // as GenerateStream. Spec paths use stateful_only when only state-bearing processors need this catch-up.
     for (const auto& p : logits_processor_list_) {
-        if (!p) {
-            continue;
-        }
         if (stateful_only && !p->isStateful()) {
             continue;
         }
         // updateStatus stores any error on the processor itself (no throws).
         p->updateStatus(new_tokens, num_new_tokens);
     }
+    // updateStatus can fail while advancing stateful processor state for the just-committed tokens.
+    // Convert that deferred processor error to a stream error before later validation/output uses
+    // the advanced state.
     pollLogitsProcessorErrors();
 }
 
@@ -1000,8 +1014,10 @@ void GenerateStream::pollLogitsProcessorErrors() {
     if (hasError()) {
         return;
     }
+    // Processors may record errors while building masks outside the stream update path.
+    // Promote the first one to stream error state so schedulers/frontend stop and report it uniformly.
     for (const auto& p : logits_processor_list_) {
-        if (p && p->hasError()) {
+        if (p->hasError()) {
             const auto err = p->error();
             reportErrorWithoutLock(err.code(), err.ToString());
             return;
