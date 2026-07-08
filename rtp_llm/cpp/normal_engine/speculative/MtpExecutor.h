@@ -103,6 +103,11 @@ protected:
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t);
 
+    void prepareStreams(const std::list<GenerateStreamPtr>& streams,
+                        std::list<GenerateStreamPtr>&       prefill_streams,
+                        std::list<GenerateStreamPtr>&       decode_streams);
+
+private:
     SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams,
                                                              const torch::Tensor&                draft_tokens);
 
@@ -111,11 +116,6 @@ protected:
                                                                      const SamplerOutput&               draft_sampler_output,
                                                                      const torch::Tensor&               draft_token_ids);
 
-    void prepareStreams(const std::list<GenerateStreamPtr>& streams,
-                        std::list<GenerateStreamPtr>&       prefill_streams,
-                        std::list<GenerateStreamPtr>&       decode_streams);
-
-private:
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;

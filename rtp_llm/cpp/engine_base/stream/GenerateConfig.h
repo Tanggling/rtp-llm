@@ -159,6 +159,9 @@ public:
     }
 
     std::string debugString() const {
+        auto summarize_optional_string = [](const std::optional<std::string>& field) {
+            return field.has_value() ? "len=" + std::to_string(field->size()) : std::string("<unset>");
+        };
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
@@ -174,9 +177,10 @@ public:
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept
                      << ", return_all_probs: " << static_cast<int>(return_all_probs)
-                     << ", json_schema: " << summarizeOptionalString(json_schema)
-                     << ", regex: " << summarizeOptionalString(regex) << ", ebnf: " << summarizeOptionalString(ebnf)
-                     << ", structural_tag: " << summarizeOptionalString(structural_tag)
+                     << ", json_schema: " << summarize_optional_string(json_schema)
+                     << ", regex: " << summarize_optional_string(regex)
+                     << ", ebnf: " << summarize_optional_string(ebnf)
+                     << ", structural_tag: " << summarize_optional_string(structural_tag)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens

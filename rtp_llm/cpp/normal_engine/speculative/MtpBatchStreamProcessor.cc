@@ -140,10 +140,9 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size           = (size_t)model_output.logits.size(1);
-    sampler_inputs.vocab_size = vocab_size;
+    sampler_inputs.vocab_size = (size_t)model_output.logits.size(1);
     if (return_all_probs != ReturnAllProbsMode::NONE) {
-        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
+        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)sampler_inputs.vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
             sampler_inputs.return_original_all_probs = true;
@@ -501,8 +500,10 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             last_hidden_states = draft_model_output.all_hidden_states.narrow(0, token_offset + token_size - 1, 1);
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
-        spec_update_infos.back().error_info = std::move(error_info);
+        StreamSpecUpdateInfo spec_update_info{
+            new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        spec_update_info.error_info = std::move(error_info);
+        spec_update_infos.push_back(std::move(spec_update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -541,14 +542,15 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             last_hidden_states = slice_t;
         }
 
-        spec_update_infos.push_back({accept_tokens[batch_idx_out],
-                                     accept_len[batch_idx_out],
-                                     -1,
-                                     std::move(last_hidden_states),
-                                     std::move(propose_all_probs)});
+        StreamSpecUpdateInfo spec_update_info{accept_tokens[batch_idx_out],
+                                              accept_len[batch_idx_out],
+                                              -1,
+                                              std::move(last_hidden_states),
+                                              std::move(propose_all_probs)};
         if (static_cast<size_t>(stream_idx) < spec_decode_output.processor_errors.size()) {
-            spec_update_infos.back().error_info = spec_decode_output.processor_errors[stream_idx];
+            spec_update_info.error_info = spec_decode_output.processor_errors[stream_idx];
         }
+        spec_update_infos.push_back(std::move(spec_update_info));
 
         token_offset += accept_len[batch_idx_out];
         batch_idx_in += cur_batch_size;

@@ -25,69 +25,58 @@ namespace rtp_llm {
 
 namespace {
 
-// Post-rejection spec-logits cap for grammar MTP verify. Keep this on the
-// CPU/vector SpeculativeSamplerOutput path to avoid the broader GPU output refactor.
-void applySpecLogitsCap(SpecLogitsVerifyRunner::LaunchResult&  spec_logits_result,
-                        const SamplerOutput&                   target_sampler_output,
-                        speculative::SpeculativeSamplerOutput& output,
-                        int64_t                                batch_size,
-                        int64_t                                propose_step) {
-    output.processor_errors = std::move(spec_logits_result.processor_errors);
-    if (!spec_logits_result.spec_cap_cpu.defined()) {
+torch::Tensor toCpuInt32(torch::Tensor tensor) {
+    if (tensor.is_cuda()) {
+        tensor = tensor.cpu();
+    }
+    return tensor.scalar_type() == torch::kInt32 ? tensor.contiguous() : tensor.to(torch::kInt32).contiguous();
+}
+
+void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
+                           const SamplerOutput&                   target_sampler_output,
+                           speculative::SpeculativeSamplerOutput& output,
+                           int64_t                                propose_step) {
+    output.processor_errors = std::move(verify_result.processor_errors);
+    if (!verify_result.spec_cap_cpu.defined()) {
         return;
     }
 
-    RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(),
-                            "spec logits cap requires target sampler token_ids");
-    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(output.accept_len.size()) == batch_size
-                                && static_cast<int64_t>(output.accept_tokens.size()) == batch_size,
-                            "spec logits cap output batch mismatch, accept_len=%zu accept_tokens=%zu batch=%lld",
+    RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(), "spec verify cap requires target token_ids");
+    const int64_t batch_size = static_cast<int64_t>(output.accept_len.size());
+    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.size() == output.accept_len.size(),
+                            "spec verify cap output batch mismatch, accept_len=%zu accept_tokens=%zu",
                             output.accept_len.size(),
-                            output.accept_tokens.size(),
-                            static_cast<long long>(batch_size));
+                            output.accept_tokens.size());
 
-    auto cap_cpu = spec_logits_result.spec_cap_cpu;
-    if (cap_cpu.is_cuda()) {
-        cap_cpu = cap_cpu.cpu();
-    }
-    cap_cpu = cap_cpu.scalar_type() == torch::kInt32 ? cap_cpu.contiguous() : cap_cpu.to(torch::kInt32).contiguous();
-
-    auto target_token_ids = target_sampler_output.token_ids;
-    if (target_token_ids.is_cuda()) {
-        target_token_ids = target_token_ids.cpu();
-    }
-    target_token_ids = target_token_ids.scalar_type() == torch::kInt32 ?
-                           target_token_ids.contiguous() :
-                           target_token_ids.to(torch::kInt32).contiguous();
+    auto cap_cpu          = toCpuInt32(verify_result.spec_cap_cpu);
+    auto target_token_ids = toCpuInt32(target_sampler_output.token_ids);
     RTP_LLM_CHECK_WITH_INFO(target_token_ids.dim() == 2,
-                            "spec logits cap target token_ids must be 2D, dim=%lld",
+                            "spec verify cap target token_ids must be 2D, dim=%lld",
                             static_cast<long long>(target_token_ids.dim()));
-
-    const int64_t token_stride = target_token_ids.size(1);
-    // The loop below indexes row (i * (propose_step + 1) + cap) with cap < propose_step,
-    // so the sampler must have emitted B*(P+1) rows. Guard the row count explicitly
-    // (dim()==2 alone does not bound size(0)) to fail fast instead of reading OOB.
     RTP_LLM_CHECK_WITH_INFO(target_token_ids.size(0) >= batch_size * (propose_step + 1),
-                            "spec logits cap target token_ids rows=%lld < batch_size*(propose_step+1)=%lld",
+                            "spec verify cap target token_ids rows=%lld < batch_size*(propose_step+1)=%lld",
                             static_cast<long long>(target_token_ids.size(0)),
                             static_cast<long long>(batch_size * (propose_step + 1)));
-    const auto* cap_ptr    = cap_cpu.data_ptr<int32_t>();
-    const auto* target_ptr = target_token_ids.data_ptr<int32_t>();
 
+    const int64_t token_stride = target_token_ids.size(1);
+    const auto*   cap_ptr      = cap_cpu.data_ptr<int32_t>();
+    const auto*   target_ptr   = target_token_ids.data_ptr<int32_t>();
+    const int      max_cap     = static_cast<int>(propose_step);
+    const int      max_len     = max_cap + 1;
     for (int64_t i = 0; i < batch_size; ++i) {
-        const int cap     = std::max(0, std::min<int>(cap_ptr[i], static_cast<int>(propose_step)));
-        const int old_len = output.accept_len[i];
-        RTP_LLM_CHECK_WITH_INFO(old_len > 0 && old_len <= propose_step + 1,
-                                "invalid accept_len[%lld]=%d (max=%lld)",
+        const int token_cap = std::max(0, std::min<int>(cap_ptr[i], max_cap));
+        const int old_len   = output.accept_len[i];
+        RTP_LLM_CHECK_WITH_INFO(old_len > 0 && old_len <= max_len,
+                                "invalid accept_len[%lld]=%d (max=%d)",
                                 static_cast<long long>(i),
                                 old_len,
-                                static_cast<long long>(propose_step + 1));
-        if (cap < propose_step && old_len > cap) {
-            output.accept_tokens[i].data_ptr<int32_t>()[cap] =
-                target_ptr[(i * (propose_step + 1) + cap) * token_stride + token_stride - 1];
+                                max_len);
+        if (token_cap < max_cap && old_len > token_cap) {
+            output.accept_tokens[i].data_ptr<int32_t>()[token_cap] =
+                target_ptr[(i * (propose_step + 1) + token_cap) * token_stride + token_stride - 1];
         }
 
-        const int new_len    = std::min(old_len, cap + 1);
+        const int new_len    = std::min(old_len, token_cap + 1);
         output.accept_len[i] = new_len;
         if (output.accept_tokens[i].size(1) != new_len) {
             output.accept_tokens[i] = output.accept_tokens[i].narrow(1, 0, new_len).contiguous();
@@ -765,11 +754,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
-            applySpecLogitsCap(spec_logits_result,
-                               sampler_output,
-                               speculative_sampler_output,
-                               static_cast<int64_t>(batch_size),
-                               static_cast<int64_t>(propose_step_));
+            applySpecVerifyResult(
+                spec_logits_result, sampler_output, speculative_sampler_output, static_cast<int64_t>(propose_step_));
         }
         // NOTE: here will have cuda device sync before update model input
         batch_stream_processor_->updateDecodePostDraftModelInput(
