@@ -542,12 +542,13 @@ protected:
     bool    hasStatefulLogitsProcessor() const;
     int64_t processorAcceptedTokenLen() const;
     void    initLogitsProcessors(const ResourceContext& resource_context, size_t init_batch_size);
+    bool    shouldStopUpdate(const std::optional<ErrorInfo>& error_info, bool force_update_info);
+    bool    syncLogitsProcessorStatus(const StreamUpdateInfo& update_info);
+    bool    syncStatefulLogitsProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void    updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
-    std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens,
-                                                        int32_t              num_new_tokens,
-                                                        const torch::Tensor& src_batch_indices,
-                                                        bool                 stateful_only);
+    std::optional<ErrorInfo> updateStatefulLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                                                int32_t              num_new_tokens);
     void validateStatefulLogitsProcessorState();
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);

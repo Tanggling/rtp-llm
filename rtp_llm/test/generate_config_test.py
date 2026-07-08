@@ -700,13 +700,16 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertEqual(elements[0]["end"], {"type": "token", "token": 123})
         self.assertTrue(self._terminate_without_stop_token(cfg))
 
-    def test_reasoning_without_grammar_keeps_think_mode_processor_path(self):
+    def test_reasoning_without_grammar_wraps_any_text_structural_tag(self):
         cfg = GenerateConfig(response_format={"type": "text"})
         reasoning_format = self._enable_thinking(cfg)
         self._validate(cfg, reasoning_format=reasoning_format)
 
-        self.assertIsNone(cfg.structural_tag)
         self.assertIsNone(cfg.json_schema)
+        structural_tag = json.loads(cfg.structural_tag)
+        elements = structural_tag["format"]["elements"]
+        self.assertEqual(elements[0]["type"], "tag")
+        self.assertEqual(elements[1], {"type": "any_text"})
         self.assertFalse(self._terminate_without_stop_token(cfg))
 
     def test_reasoning_final_structural_tag_with_existing_budget_rejected(self):

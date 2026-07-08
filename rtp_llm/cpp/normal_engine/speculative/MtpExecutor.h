@@ -106,6 +106,11 @@ protected:
     SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams,
                                                              const torch::Tensor&                draft_tokens);
 
+    SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerifyIfNeeded(const std::list<GenerateStreamPtr>& streams,
+                                                                     const GptModelInputs&              model_input,
+                                                                     const SamplerOutput&               draft_sampler_output,
+                                                                     const torch::Tensor&               draft_token_ids);
+
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);

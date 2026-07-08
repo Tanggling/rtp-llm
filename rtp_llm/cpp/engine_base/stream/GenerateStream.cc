@@ -726,12 +726,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
-    if (update_info.error_info.has_value()) {
-        const auto& error = update_info.error_info.value();
-        reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
-        return;
-    }
-    if (hasError() && !update_info.force_update_info) {
+    if (shouldStopUpdate(update_info.error_info, update_info.force_update_info)) {
         return;
     }
 
@@ -741,10 +736,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         const_cast<torch::Tensor&>(new_tokens).zero_();
     }
 
-    auto       num_new_tokens = update_info.num_new_tokens;
-    int        cur_cached_len = seqLength() - 1;
-    const int  seq_len_before_commit = seqLength();
-    int        error_token_id        = 0;
+    auto num_new_tokens = update_info.num_new_tokens;
+    int  cur_cached_len = seqLength() - 1;
+
+    int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -800,19 +795,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
             "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
     }
 
-    // Notify processors before publishing so MTP prefill T0 reaches the grammar matcher
-    // before step 2 builds the verify mask, and mismatches surface as hasError().
-    const int committed_num_new_tokens = std::max(0, seqLength() - seq_len_before_commit);
-    if (committed_num_new_tokens > 0) {
-        auto processor_error =
-            updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), /*stateful_only=*/true);
-        if (processor_error.has_value()) {
-            reportEventWithoutLock(StreamEvents::Error, processor_error->code(), processor_error->ToString());
-            return;
-        }
-    }
-    validateStatefulLogitsProcessorState();
-    if (hasError()) {
+    // Keep stateful processors, e.g. grammar, aligned before the next spec verify mask is built.
+    if (!syncStatefulLogitsProcessorStatus(new_tokens, accept_token_num)) {
         return;
     }
 
@@ -836,19 +820,13 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
-    if (update_info.error_info.has_value()) {
-        const auto& error = update_info.error_info.value();
-        reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
-        return;
-    }
-    if (hasError() && !update_info.force_update_info) {
+    if (shouldStopUpdate(update_info.error_info, update_info.force_update_info)) {
         return;
     }
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
-    const int   seq_len_before_commit = seqLength();
-    int         error_token_id        = 0;
+    int         error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -867,31 +845,16 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
 
-    const bool was_done                 = getStatus() == StreamState::FINISHED;
-    const int  committed_num_new_tokens = std::max(0, seqLength() - seq_len_before_commit);
-
-    // Validate before publishing so stateful-processor mismatches block bad output.
-    if (committed_num_new_tokens > 0) {
-        auto processor_error = updateLogitProcessorStatus(update_info.new_tokens,
-                                                          committed_num_new_tokens,
-                                                          update_info.src_batch_indices,
-                                                          /*stateful_only=*/was_done);
-        if (processor_error.has_value()) {
-            reportEventWithoutLock(StreamEvents::Error, processor_error->code(), processor_error->ToString());
-            return;
-        }
-        validateStatefulLogitsProcessorState();
-        if (hasError()) {
-            return;
-        }
-    }
-
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
+
+    if (!is_done && !syncLogitsProcessorStatus(update_info)) {
+        return;
+    }
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
@@ -954,6 +917,38 @@ int64_t GenerateStream::processorAcceptedTokenLen() const {
     return accepted_token_len < 0 ? 0 : accepted_token_len;
 }
 
+bool GenerateStream::shouldStopUpdate(const std::optional<ErrorInfo>& error_info, bool force_update_info) {
+    if (error_info.has_value()) {
+        const auto& error = error_info.value();
+        reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
+        return true;
+    }
+    return hasError() && !force_update_info;
+}
+
+bool GenerateStream::syncLogitsProcessorStatus(const StreamUpdateInfo& update_info) {
+    auto processor_error = updateLogitProcessorStatus(update_info);
+    if (processor_error.has_value()) {
+        reportEventWithoutLock(StreamEvents::Error, processor_error->code(), processor_error->ToString());
+        return false;
+    }
+    validateStatefulLogitsProcessorState();
+    return !hasError();
+}
+
+bool GenerateStream::syncStatefulLogitsProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+    if (num_new_tokens <= 0) {
+        return true;
+    }
+    auto processor_error = updateStatefulLogitProcessorStatus(new_tokens, num_new_tokens);
+    if (processor_error.has_value()) {
+        reportEventWithoutLock(StreamEvents::Error, processor_error->code(), processor_error->ToString());
+        return false;
+    }
+    validateStatefulLogitsProcessorState();
+    return !hasError();
+}
+
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!src_batch_indices.defined() || !hasNumBeams()) {
@@ -964,39 +959,46 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
     std::vector<int> src_batch_indices_vec(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(src_batch_indices_vec.size() == currentBatchSize());
 
-    for (const auto& processor : getAllLogitsProcessorPtr()) {
-        processor->updateMultiSeqStatus(src_batch_indices_vec);
+    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+        logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
 
 std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    return updateLogitProcessorStatus(update_info.new_tokens,
-                                      update_info.num_new_tokens,
-                                      update_info.src_batch_indices,
-                                      /*stateful_only=*/false);
-}
+    updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
 
-std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
-                                                                    int32_t              num_new_tokens,
-                                                                    const torch::Tensor& src_batch_indices,
-                                                                    bool                 stateful_only) {
-    RTP_LLM_PROFILE_FUNCTION();
-    updateLogitProcessorMultiSeqStatus(src_batch_indices);
-
+    const auto& new_tokens = update_info.new_tokens;
     if (new_tokens.size(0) != currentBatchSize()) {
         return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
                          "updateLogitProcessorStatus: new_tokens.size(0)=" + std::to_string(new_tokens.size(0))
                              + " != currentBatchSize()=" + std::to_string(currentBatchSize()));
     }
+    auto num_new_tokens = update_info.num_new_tokens;
 
-    // Notify processors about newly committed tokens so token-dependent constraints observe the same sequence
-    // as GenerateStream. Spec paths use stateful_only when only state-bearing processors need this catch-up.
-    for (const auto& p : logits_processor_list_) {
-        if (stateful_only && !p->isStateful()) {
+    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+        auto error = logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
+        if (error.has_value()) {
+            return error;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<ErrorInfo> GenerateStream::updateStatefulLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                                                            int32_t              num_new_tokens) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (new_tokens.size(0) != currentBatchSize()) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                         "updateStatefulLogitProcessorStatus: new_tokens.size(0)=" + std::to_string(new_tokens.size(0))
+                             + " != currentBatchSize()=" + std::to_string(currentBatchSize()));
+    }
+
+    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+        if (!logit_processor_ptr->isStateful()) {
             continue;
         }
-        auto error = p->updateStatus(new_tokens, num_new_tokens);
+        auto error = logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
         if (error.has_value()) {
             return error;
         }

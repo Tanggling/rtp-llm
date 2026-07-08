@@ -9,7 +9,6 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
@@ -107,8 +106,6 @@ class Pipeline(object):
         else:
             # 认为是从frontend_worker传递进来的，不需要再处理一遍
             config = generate_config
-        if generate_env_config is None:
-            generate_env_config = GenerateEnvConfig()
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
         config.add_thinking_params(tokenizer, generate_env_config)

@@ -73,6 +73,8 @@ class ResponseFormatBuilder:
 
         if constraint is not None:
             self._wrap_grammar_with_reasoning_envelope(constraint)
+        else:
+            self._wrap_final_format_with_reasoning_envelope({"type": "any_text"})
 
     @classmethod
     def grammar_terminate_without_stop_token(cls, config: Any) -> bool:
@@ -217,6 +219,11 @@ class ResponseFormatBuilder:
         self, constraint: GrammarConstraint
     ) -> None:
         final_format = constraint.final_format_node()
+        self._wrap_final_format_with_reasoning_envelope(final_format)
+
+    def _wrap_final_format_with_reasoning_envelope(
+        self, final_format: Dict[str, Any]
+    ) -> None:
         reasoning_prefix = self.reasoning_format.prefix_format(
             self.config.max_thinking_tokens
         )

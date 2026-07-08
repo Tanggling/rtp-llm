@@ -29,11 +29,6 @@ public:
                            int64_t eos_token_id) const;
 
 private:
-    ErrorResult<BaseLogitsProcessorPtr>
-    createGrammarProcessor(const std::shared_ptr<GenerateInput>& generate_input,
-                           const GrammarKeyCpp& key,
-                           int64_t eos_token_id) const;
-
     std::shared_ptr<XGrammarBackend> grammar_backend_;
 };
 
