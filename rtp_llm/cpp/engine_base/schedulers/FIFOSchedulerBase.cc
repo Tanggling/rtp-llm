@@ -166,13 +166,6 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
             }
         }
 
-        // Skip streams still waiting for async preparation (e.g. grammar compile)
-        // unless an external caller already marked them runnable.
-        if (stream->isPreparationPending() && !stream->hasEvent(StreamEvents::CanRun)) {
-            it++;
-            continue;
-        }
-
         if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
             && evaluateRunningMemory(new_streams, stream)) {
             stream->reportEvent(StreamEvents::CanRun);
