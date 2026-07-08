@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -304,6 +305,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.sp_config,
                                                               warm_up_));
 
+    LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 
     for (auto& mtp_params : *propose_params->mtp_model_params_) {

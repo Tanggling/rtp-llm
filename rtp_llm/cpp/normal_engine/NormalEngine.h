@@ -73,7 +73,6 @@ private:
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
-    GrammarConfig                                 grammar_config_;
     EPLBConfig                                    eplb_config;
     PDSepConfig                                   pd_sep_config;
     ProfilingDebugLoggingConfig                   profiling_debug_logging_config;

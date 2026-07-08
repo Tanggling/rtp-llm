@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -67,7 +66,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     runtime_config(params.runtime_config),
-    grammar_config_(params.grammar_config),
     eplb_config(params.eplb_config),
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
@@ -135,9 +133,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
-    resource_context_.logits_processor_factory = std::make_shared<LogitsProcessorFactory>(
-        params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
-
     if (propose_params_) {
         executor_.reset(new MtpExecutor(params,
                                         propose_params,

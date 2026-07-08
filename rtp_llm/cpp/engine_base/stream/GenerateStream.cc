@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -87,7 +86,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    initLogitsProcessors(resource_context, init_batch_size);
+    auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
+        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+    if (processors_result.ok()) {
+        logits_processor_list_ = std::move(processors_result.value());
+    } else {
+        const auto& err = processors_result.status();
+        reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());
+    }
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -97,26 +103,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 #endif
         generator_.set_current_seed(generateConfig()->random_seed.value());
     }
-}
-
-void GenerateStream::initLogitsProcessors(const ResourceContext& resource_context, size_t init_batch_size) {
-    const auto& factory = resource_context.logits_processor_factory;
-    if (!factory) {
-        RTP_LLM_LOG_DEBUG("GenerateStream: logits processor factory is not initialized; skip logits processors");
-        return;
-    }
-
-    auto processors_result =
-        factory->createLogitsProcessors(generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
-    if (!processors_result.ok()) {
-        const auto& err = processors_result.status();
-        reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());
-        return;
-    }
-
-    logits_processor_list_ = std::move(processors_result.value());
-    logits_processor_list_.erase(std::remove(logits_processor_list_.begin(), logits_processor_list_.end(), nullptr),
-                                 logits_processor_list_.end());
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {

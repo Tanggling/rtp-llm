@@ -541,7 +541,6 @@ public:
 protected:
     bool    hasStatefulLogitsProcessor() const;
     int64_t processorAcceptedTokenLen() const;
-    void    initLogitsProcessors(const ResourceContext& resource_context, size_t init_batch_size);
     bool    commitStatefulTokens(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void    updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void    updateLogitProcessorStatus(const StreamUpdateInfo& update_info);

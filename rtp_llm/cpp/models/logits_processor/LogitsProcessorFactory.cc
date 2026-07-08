@@ -51,10 +51,15 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
 
 }  // namespace
 
-LogitsProcessorFactory::LogitsProcessorFactory(const ModelConfig&   model_config,
-                                               const GrammarConfig& grammar_config,
-                                               const std::string&   tree_decode_config):
-    grammar_backend_(XGrammarBackend::create(model_config.tokenizer_info_json, grammar_config)) {
+std::shared_ptr<XGrammarBackend>& LogitsProcessorFactory::grammarBackend() {
+    static std::shared_ptr<XGrammarBackend> backend;
+    return backend;
+}
+
+void LogitsProcessorFactory::init(const ModelConfig&   model_config,
+                                  const GrammarConfig& grammar_config,
+                                  const std::string&   tree_decode_config) {
+    grammarBackend() = XGrammarBackend::create(model_config.tokenizer_info_json, grammar_config);
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 
@@ -62,7 +67,7 @@ ErrorResult<std::vector<BaseLogitsProcessorPtr>>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,
                                                int32_t,
-                                               int64_t                        eos_token_id) const {
+                                               int64_t                        eos_token_id) {
     std::vector<BaseLogitsProcessorPtr> result;
 
     auto&         config      = *generate_input->generate_config;
@@ -74,7 +79,8 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                              "grammar-constrained decoding does not support beam search or "
                              "num_return_sequences > 1");
         }
-        if (!grammar_backend_) {
+        auto& backend = grammarBackend();
+        if (!backend) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS,
                              "structured output requested but constraint backend is disabled "
                              "(check engine startup logs: tokenizer info empty or backend init failed).");
@@ -89,7 +95,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                           static_cast<int>(config.in_think_mode),
                           static_cast<int>(terminate_without_stop_token));
 
-        auto matcher_or = grammar_backend_->createMatcherFromKey(grammar_key, terminate_without_stop_token);
+        auto matcher_or = backend->createMatcherFromKey(grammar_key, terminate_without_stop_token);
         if (!matcher_or.ok()) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(matcher_or.status().message()));
         }
