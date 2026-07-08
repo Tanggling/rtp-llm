@@ -94,7 +94,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
             generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
         if (!factory_result.ok()) {
             const auto& err = factory_result.status();
-            reportErrorWithoutLock(err.code(), err.ToString());
+            reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());
         } else {
             logits_processor_list_ = std::move(factory_result.value());
             // Keep stream-owned processors non-null so later update loops can dereference directly.
@@ -531,10 +531,6 @@ void GenerateStream::reportError(ErrorCode error_code, const std::string& error_
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
 }
 
-void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
-    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
-}
-
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return generate_status_->hasEvent(event);
@@ -722,37 +718,6 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
-GenerateStream::TokenCommitResult GenerateStream::commitTokenIdsWithoutLock(const torch::Tensor& new_tokens,
-                                                                            int                  num_new_tokens) {
-    const int seq_len_before_commit = seqLength();
-    int       error_token_id        = 0;
-
-    TokenCommitResult result;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportOutOfVocabErrorWithoutLock(error_token_id);
-        return result;
-    }
-
-    result.ok                       = true;
-    result.committed_num_new_tokens = std::max(0, seqLength() - seq_len_before_commit);
-    return result;
-}
-
-void GenerateStream::reportOutOfVocabErrorWithoutLock(int error_token_id) {
-    reportEventWithoutLock(StreamEvents::Error,
-                           ErrorCode::OUT_OF_VOCAB_RANGE,
-                           "output token id:" + std::to_string(error_token_id)
-                               + " out of vocab size: " + std::to_string(vocab_size_));
-}
-
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
@@ -760,7 +725,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     *is_context_stream_ = false;
     if (update_info.error_info.has_value()) {
         const auto& error = update_info.error_info.value();
-        reportErrorWithoutLock(error.code(), error.ToString());
+        reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
         return;
     }
     if (hasError() && !update_info.force_update_info) {
@@ -775,8 +740,21 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     auto       num_new_tokens = update_info.num_new_tokens;
     int        cur_cached_len = seqLength() - 1;
-    const auto commit_result  = commitTokenIdsWithoutLock(new_tokens, num_new_tokens);
-    if (!commit_result.ok) {
+    const int  seq_len_before_commit = seqLength();
+    int        error_token_id        = 0;
+    if (!complete_token_ids_->update(new_tokens,
+                                     begin_time_us_,
+                                     num_new_tokens,
+                                     generate_input_->inputLength(),
+                                     maxTokenNum(),
+                                     vocab_size_,
+                                     hasNumBeams(),
+                                     streamId(),
+                                     error_token_id)) {
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::OUT_OF_VOCAB_RANGE,
+                               "output token id:" + std::to_string(error_token_id)
+                                   + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
 
@@ -821,12 +799,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     // Notify processors before publishing so MTP prefill T0 reaches the grammar matcher
     // before step 2 builds the verify mask, and mismatches surface as hasError().
-    const int committed_num_new_tokens = commit_result.committed_num_new_tokens;
+    const int committed_num_new_tokens = std::max(0, seqLength() - seq_len_before_commit);
     if (committed_num_new_tokens > 0) {
         auto processor_error =
             updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), /*stateful_only=*/true);
         if (processor_error.has_value()) {
-            reportErrorWithoutLock(processor_error->code(), processor_error->ToString());
+            reportEventWithoutLock(StreamEvents::Error, processor_error->code(), processor_error->ToString());
             return;
         }
     }
@@ -853,15 +831,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    updateWithoutLock(update_info);
-}
-
-void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
     if (update_info.error_info.has_value()) {
         const auto& error = update_info.error_info.value();
-        reportErrorWithoutLock(error.code(), error.ToString());
+        reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
         return;
     }
     if (hasError() && !update_info.force_update_info) {
@@ -870,15 +844,28 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
-    const auto  commit_result  = commitTokenIdsWithoutLock(new_tokens, num_new_tokens);
-    if (!commit_result.ok) {
+    const int   seq_len_before_commit = seqLength();
+    int         error_token_id        = 0;
+    if (!complete_token_ids_->update(new_tokens,
+                                     begin_time_us_,
+                                     num_new_tokens,
+                                     generate_input_->inputLength(),
+                                     maxTokenNum(),
+                                     vocab_size_,
+                                     hasNumBeams(),
+                                     streamId(),
+                                     error_token_id)) {
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::OUT_OF_VOCAB_RANGE,
+                               "output token id:" + std::to_string(error_token_id)
+                                   + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
 
     const bool was_done                 = getStatus() == StreamState::FINISHED;
-    const int  committed_num_new_tokens = commit_result.committed_num_new_tokens;
+    const int  committed_num_new_tokens = std::max(0, seqLength() - seq_len_before_commit);
 
     // Validate before publishing so stateful-processor mismatches block bad output.
     if (committed_num_new_tokens > 0) {
@@ -887,7 +874,7 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
                                                           update_info.src_batch_indices,
                                                           /*stateful_only=*/was_done);
         if (processor_error.has_value()) {
-            reportErrorWithoutLock(processor_error->code(), processor_error->ToString());
+            reportEventWithoutLock(StreamEvents::Error, processor_error->code(), processor_error->ToString());
             return;
         }
         validateStatefulLogitsProcessorState();
@@ -1023,7 +1010,8 @@ void GenerateStream::validateStatefulLogitsProcessorState() {
     if (processor_token_len == stream_output_len) {
         return;
     }
-    reportErrorWithoutLock(ErrorCode::UNKNOWN_ERROR,
+    reportEventWithoutLock(StreamEvents::Error,
+                           ErrorCode::UNKNOWN_ERROR,
                            "stateful logits processor accepted token length mismatch: processor="
                                + std::to_string(processor_token_len)
                                + ", stream_output=" + std::to_string(stream_output_len));

@@ -747,8 +747,8 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 }
 
-TEST_F(StreamCacheResourceTest, testAwaitLoadCache_ZeroReuseLen_DoesNotOverwriteExisting) {
-    // Directly tests that awaitLoadCache with total_reuse_len == 0 preserves existing values.
+TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {
+    // Directly tests that waitLoadCacheDone with total_reuse_len == 0 preserves existing values.
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
@@ -771,8 +771,8 @@ TEST_F(StreamCacheResourceTest, testAwaitLoadCache_ZeroReuseLen_DoesNotOverwrite
     auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
     load_ctx->setFusedReadContext(nullptr);
 
-    // Call awaitLoadCache directly
-    resource.awaitLoadCache(load_ctx);
+    // Call waitLoadCacheDone directly
+    resource.waitLoadCacheDone(load_ctx);
 
     // All values should be preserved — not overwritten with 0
     EXPECT_EQ(stream_->reuseLength(), 100);

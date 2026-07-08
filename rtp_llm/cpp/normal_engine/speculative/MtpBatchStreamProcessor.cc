@@ -1,14 +1,11 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-
-#include <algorithm>
-#include <cstring>
 #include <numeric>
+#include <cstring>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -74,10 +71,9 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream
     return absl::OkStatus();
 }
 
-absl::Status MtpBatchStreamProcessor::dispatchDecode(
-    const StreamGroups&                          stream_groups,
-    const speculative::SpeculativeSamplerOutput& spec_decode_output,
-    const MergedOutput&                          draft_prefill_output) const {
+absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
+                                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                                     const MergedOutput& draft_prefill_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
@@ -547,6 +543,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
 
+        // speculative decoding info
         torch::Tensor propose_all_probs =
             draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
 
@@ -554,7 +551,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            auto slice_t       = draft_model_output.all_hidden_states.narrow(0, token_offset + cur_accept_len - 1, 1);
+            auto slice_t =
+                draft_model_output.all_hidden_states.narrow(0, token_offset + cur_accept_len - 1, 1);
             last_hidden_states = slice_t;
         }
 
