@@ -157,13 +157,15 @@ std::vector<size_t> SpecLogitsVerifyRunner::resetPreviousActiveRows(const Verify
     return rows_to_reset;
 }
 
-std::vector<size_t> SpecLogitsVerifyRunner::mergeProcessorMasks(const LaunchTask& task, const VerifyShape& shape) {
+SpecLogitsVerifyRunner::MergeProcessorMasksResult
+SpecLogitsVerifyRunner::mergeProcessorMasks(const LaunchTask& task, const VerifyShape& shape) {
     auto proc_mask = processor_bitmask_cpu_.narrow(0, 0, shape.propose_step + 1)
                          .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
     auto*               merged_base = merged_bitmask_cpu_.data_ptr<int32_t>();
     auto*               cap_ptr     = spec_cap_cpu_.data_ptr<int32_t>();
     std::vector<size_t> active_rows;
     active_rows.reserve(task.active.size());
+    std::vector<std::optional<ErrorInfo>> processor_errors(shape.batch_size);
 
     for (const auto& item : task.active) {
         RTP_LLM_CHECK_WITH_INFO(item.processor != nullptr, "MTP spec logits verify active processor is null");
@@ -180,15 +182,22 @@ std::vector<size_t> SpecLogitsVerifyRunner::mergeProcessorMasks(const LaunchTask
         request.bitmask_size_int32 = shape.bitmask_words;
         request.vocab_size         = shape.vocab_size;
 
-        // Never throws; errors stash on the processor and surface via hasError() later.
-        const int cap = std::max(0, std::min(item.processor->tryAcceptAndFillBitmask(request), shape.propose_step));
+        int  cap    = 0;
+        auto cap_or = item.processor->tryAcceptAndFillBitmask(request);
+        if (!cap_or.ok()) {
+            if (!processor_errors[item.stream_idx].has_value()) {
+                processor_errors[item.stream_idx] = cap_or.status();
+            }
+        } else {
+            cap = std::max(0, std::min(cap_or.value(), shape.propose_step));
+        }
 
         auto* merged_row = merged_base + item.stream_idx * shape.row_words;
         bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), shape.row_words);
         cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
         appendUniqueRow(active_rows, item.stream_idx);
     }
-    return active_rows;
+    return {std::move(active_rows), std::move(processor_errors)};
 }
 
 void SpecLogitsVerifyRunner::uploadChangedRows(const std::vector<size_t>& rows_to_reset,
@@ -249,10 +258,12 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
     std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
 
     materializeDraftTokensToCpu(task);
-    auto active_rows = mergeProcessorMasks(task, shape);
-    uploadChangedRows(rows_to_reset, active_rows, shape);
-    last_active_stream_rows_ = std::move(active_rows);
-    return makeResult(shape);
+    auto merge_result = mergeProcessorMasks(task, shape);
+    uploadChangedRows(rows_to_reset, merge_result.active_rows, shape);
+    last_active_stream_rows_ = std::move(merge_result.active_rows);
+    auto result              = makeResult(shape);
+    result.processor_errors  = std::move(merge_result.processor_errors);
+    return result;
 }
 
 }  // namespace rtp_llm

@@ -443,40 +443,37 @@ GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher
 
 GrammarLogitsProcessor::~GrammarLogitsProcessor() = default;
 
-void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
-    if (hasError()) {
-        return;
-    }
+std::optional<ErrorInfo>
+GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     if (!matcher_) {
-        return;
+        return std::nullopt;
     }
     const size_t batch_size = finish_idx - start_idx;
     if (batch_size == 0) {
-        return;
+        return std::nullopt;
     }
     if (batch_size != 1) {
-        setError(ErrorCode::INVALID_PARAMS, "grammar logits processor only supports single sequence decoding");
-        return;
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "grammar logits processor only supports single sequence decoding");
     }
     if (inputs.finished_mask.defined()) {
         const auto* finished = inputs.finished_mask.data_ptr<bool>();
         if (finished[start_idx]) {
-            return;
+            return std::nullopt;
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        setError(decode_mask_builder_->apply(inputs.logits[start_idx], *matcher_, accepted_token_len_, eos_token_id_));
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    auto error = decode_mask_builder_->apply(inputs.logits[start_idx], *matcher_, accepted_token_len_, eos_token_id_);
+    if (error.hasError()) {
+        return error;
     }
+    return std::nullopt;
 }
 
-void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
-    if (hasError()) {
-        return;
-    }
+std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens,
+                                                              int32_t              num_new_tokens) {
     if (!matcher_) {
-        return;
+        return std::nullopt;
     }
 
     RTP_LLM_CHECK(new_tokens.dim() == 2);
@@ -488,25 +485,23 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
     // Keep parity with process(): this processor owns one matcher state machine,
     // so multi-sequence updates would corrupt parser state.
     if (batch_size != 1) {
-        setError(ErrorCode::INVALID_PARAMS, "grammar logits processor only supports single sequence decoding");
-        return;
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "grammar logits processor only supports single sequence decoding");
     }
     const auto* data = new_tokens.data_ptr<int32_t>();
 
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        setError(acceptCommittedLocked(data, static_cast<size_t>(num_new_tokens)));
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    auto error = acceptCommittedLocked(data, static_cast<size_t>(num_new_tokens));
+    if (error.hasError()) {
+        return error;
     }
+    return std::nullopt;
 }
 
 bool GrammarLogitsProcessor::isSpecVerifyEligible() const {
     return matcher_ != nullptr;
 }
 
-int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
-    if (hasError()) {
-        return 0;
-    }
+ErrorResult<int> GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
     if (!matcher_ || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
         return static_cast<int>(request.propose_step);
     }
@@ -516,12 +511,11 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto                        cap_or = verifySpecDraftAndFillBitmask(*matcher_, eos_token_id_, request);
         if (!cap_or.ok()) {
-            setError(cap_or.status());
-            return 0;
+            return cap_or.status();
         }
         cap_out = cap_or.value();
     }
-    return cap_out;
+    return ErrorResult<int>(std::move(cap_out));
 }
 
 ErrorInfo GrammarLogitsProcessor::acceptCommittedLocked(const int32_t* tokens, size_t n) {

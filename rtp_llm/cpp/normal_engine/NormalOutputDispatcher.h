@@ -1,11 +1,20 @@
 #pragma once
 
+#include <optional>
+
 #include <torch/all.h>
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 
 namespace rtp_llm {
+
+std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
+                                                   const torch::Tensor& success_cpu,
+                                                   int                  batch_idx_in,
+                                                   int                  batch_idx_out,
+                                                   int                  cur_batch_size,
+                                                   int                  next_batch_size);
 
 class NormalOutputDispatcher {
 public:

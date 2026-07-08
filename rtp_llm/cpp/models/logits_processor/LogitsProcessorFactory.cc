@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -49,14 +50,22 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
     return {};
 }
 
-ErrorResult<BaseLogitsProcessorPtr>
-createGrammarProcessor(const LogitsProcessorFactoryParams& params, const GrammarKeyCpp& key, int64_t eos_token_id) {
-    const auto& input = params.generate_input;
-    if (!input || !input->generate_config || key.empty()) {
+}  // namespace
+
+LogitsProcessorFactory::LogitsProcessorFactory(const ModelConfig&   model_config,
+                                               const GrammarConfig& grammar_config,
+                                               const std::string&   tree_decode_config):
+    grammar_backend_(XGrammarBackend::create(model_config.tokenizer_info_json, grammar_config)) {
+    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
+}
+
+ErrorResult<BaseLogitsProcessorPtr> LogitsProcessorFactory::createGrammarProcessor(
+    const std::shared_ptr<GenerateInput>& generate_input, const GrammarKeyCpp& key, int64_t eos_token_id) const {
+    if (!generate_input || !generate_input->generate_config || key.empty()) {
         return BaseLogitsProcessorPtr{};
     }
-    auto& config = *input->generate_config;
-    if (!params.grammar_backend) {
+    auto& config = *generate_input->generate_config;
+    if (!grammar_backend_) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS,
                          "structured output requested but constraint backend is disabled "
                          "(check engine startup logs: tokenizer info empty or backend init failed).");
@@ -70,7 +79,7 @@ createGrammarProcessor(const LogitsProcessorFactoryParams& params, const Grammar
                       static_cast<int>(config.in_think_mode),
                       static_cast<int>(terminate_without_stop_token));
 
-    auto matcher_or = params.grammar_backend->createMatcherFromKey(key, terminate_without_stop_token);
+    auto matcher_or = grammar_backend_->createMatcherFromKey(key, terminate_without_stop_token);
     if (!matcher_or.ok()) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(matcher_or.status().message()));
     }
@@ -78,22 +87,18 @@ createGrammarProcessor(const LogitsProcessorFactoryParams& params, const Grammar
         std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id));
 }
 
-}  // namespace
-
-void LogitsProcessorFactory::init(const std::string& ckpt_path, const std::string& tree_decode_config) {
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(ckpt_path, tree_decode_config);
-}
-
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>
-LogitsProcessorFactory::createLogitsProcessors(const LogitsProcessorFactoryParams& params) {
+LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
+                                               int32_t                        init_batch_size,
+                                               int32_t                        max_batch_size,
+                                               int64_t                        eos_token_id) const {
     std::vector<BaseLogitsProcessorPtr> result;
 
-    const auto& generate_input = params.generate_input;
     auto&       config         = *generate_input->generate_config;
 
     GrammarKeyCpp grammar_key = keyFromGenerateConfig(config);
 
-    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, params.max_batch_size);
+    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size);
     if (think_processor != nullptr && grammar_key.empty()) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
     }
@@ -104,24 +109,25 @@ LogitsProcessorFactory::createLogitsProcessors(const LogitsProcessorFactoryParam
                              "grammar-constrained decoding does not support beam search or "
                              "num_return_sequences > 1");
         }
-        auto grammar_processor_result = createGrammarProcessor(params, grammar_key, params.eos_token_id);
+        auto grammar_processor_result =
+            createGrammarProcessor(generate_input, grammar_key, eos_token_id);
         if (!grammar_processor_result.ok()) {
             return grammar_processor_result.status();
         }
         result.push_back(std::move(grammar_processor_result.value()));
     }
 
-    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, params.init_batch_size);
+    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
     if (tree_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_processor));
     }
 
-    auto rec_processor = RecommendationLogitsProcessor::fromGenerateInput(generate_input, params.init_batch_size);
+    auto rec_processor = RecommendationLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
     if (rec_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(rec_processor));
     }
 
-    auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, params.eos_token_id);
+    auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, eos_token_id);
     if (multi_seq_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_processor));
     }

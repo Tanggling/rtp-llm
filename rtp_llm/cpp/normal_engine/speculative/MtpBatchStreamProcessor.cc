@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -73,9 +74,10 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream
     return absl::OkStatus();
 }
 
-absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
-                                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                                     const MergedOutput& draft_prefill_output) const {
+absl::Status MtpBatchStreamProcessor::dispatchDecode(
+    const StreamGroups&                          stream_groups,
+    const speculative::SpeculativeSamplerOutput& spec_decode_output,
+    const MergedOutput&                          draft_prefill_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
@@ -497,11 +499,8 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
                 new_all_token_ids_cpu.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
         }
 
-        for (int i = 0; i < cur_batch_size; ++i) {
-            if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
-                stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
-            }
-        }
+        auto error_info = collectStreamSamplerError(
+            sampler_output, success_cpu, batch_idx_in, batch_idx_out, cur_batch_size, next_batch_size);
 
         // speculative decoding info
         torch::Tensor propose_all_probs =
@@ -512,7 +511,15 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             last_hidden_states = draft_model_output.all_hidden_states.narrow(0, token_offset + token_size - 1, 1);
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo update_info{new_tokens,
+                                         1,
+                                         -1,
+                                         std::move(last_hidden_states),
+                                         std::move(propose_all_probs),
+                                         /*update_remote_generate=*/true,
+                                         /*force_update_info=*/false,
+                                         std::move(error_info)};
+        spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -534,6 +541,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
     int token_offset  = 0;
+    int stream_idx    = 0;
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -550,15 +558,26 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             last_hidden_states = slice_t;
         }
 
-        spec_update_infos.push_back({accept_tokens[batch_idx_out],
-                                     cur_accept_len,
-                                     -1,
-                                     std::move(last_hidden_states),
-                                     std::move(propose_all_probs)});
+        std::optional<ErrorInfo> error_info;
+        if (static_cast<size_t>(stream_idx) < spec_decode_output.processor_errors.size()
+            && spec_decode_output.processor_errors[stream_idx].has_value()) {
+            error_info = spec_decode_output.processor_errors[stream_idx].value();
+        }
+
+        StreamSpecUpdateInfo update_info{accept_tokens[batch_idx_out],
+                                         cur_accept_len,
+                                         -1,
+                                         std::move(last_hidden_states),
+                                         std::move(propose_all_probs),
+                                         /*update_remote_generate=*/true,
+                                         /*force_update_info=*/false,
+                                         std::move(error_info)};
+        spec_update_infos.push_back(std::move(update_info));
 
         token_offset += cur_accept_len;
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
+        stream_idx++;
     }
 }
 

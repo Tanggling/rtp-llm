@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <random>
 #include <stdexcept>
@@ -263,11 +264,15 @@ public:
     FakeGrammarSpecLogitsProcessor(std::vector<std::vector<int32_t>> allowed_tokens_by_row, int cap):
         allowed_tokens_by_row_(std::move(allowed_tokens_by_row)), cap_(cap) {}
 
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {}
+    std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
+        return std::nullopt;
+    }
 
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override {}
 
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {}
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
+        return std::nullopt;
+    }
 
     bool isStateful() const override {
         return true;
@@ -277,7 +282,7 @@ public:
         return true;
     }
 
-    int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+    ErrorResult<int> tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
         observed_draft_tokens.assign(request.draft_tokens, request.draft_tokens + request.propose_step);
         for (int row = 0; row <= request.propose_step; ++row) {
             auto* row_bits = request.bitmask_cpu_out + static_cast<size_t>(row) * request.bitmask_size_int32;
@@ -286,7 +291,8 @@ public:
                 row_bits[token / 32] |= static_cast<int32_t>(1u << (token % 32));
             }
         }
-        return cap_;
+        int cap = cap_;
+        return ErrorResult<int>(std::move(cap));
     }
 
     std::vector<int32_t> observed_draft_tokens;
@@ -298,11 +304,15 @@ private:
 
 class FakeNormalDecodeOnlyProcessor: public BaseLogitsProcessor {
 public:
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {}
+    std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
+        return std::nullopt;
+    }
 
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override {}
 
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {}
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
+        return std::nullopt;
+    }
 
     ScoreBatchRole scoreBatchRole() const override {
         return ScoreBatchRole::kNormalDecodeOnly;

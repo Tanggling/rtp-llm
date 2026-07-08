@@ -14,7 +14,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
 #if USING_CUDA
@@ -31,11 +30,12 @@ namespace {
 
 // Post-rejection spec-logits cap for grammar/think MTP verify. Keep this on the
 // CPU/vector SpeculativeSamplerOutput path to avoid the broader GPU output refactor.
-void applySpecLogitsCap(const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                        const SamplerOutput&                        target_sampler_output,
-                        speculative::SpeculativeSamplerOutput&      output,
-                        int64_t                                     batch_size,
-                        int64_t                                     propose_step) {
+void applySpecLogitsCap(SpecLogitsVerifyRunner::LaunchResult&  spec_logits_result,
+                        const SamplerOutput&                   target_sampler_output,
+                        speculative::SpeculativeSamplerOutput& output,
+                        int64_t                                batch_size,
+                        int64_t                                propose_step) {
+    output.processor_errors = std::move(spec_logits_result.processor_errors);
     if (!spec_logits_result.spec_cap_cpu.defined()) {
         return;
     }
@@ -318,7 +318,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.sp_config,
                                                               warm_up_));
 
-    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 
     for (auto& mtp_params : *propose_params->mtp_model_params_) {

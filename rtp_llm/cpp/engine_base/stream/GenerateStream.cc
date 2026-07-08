@@ -89,24 +89,21 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     // Surface factory errors (grammar compile, etc.) on the stream during construction.
-    {
-        LogitsProcessorFactoryParams factory_params;
-        factory_params.grammar_backend = resource_context.grammar_backend;
-        factory_params.generate_input  = generate_input_;
-        factory_params.init_batch_size = init_batch_size;
-        factory_params.max_batch_size  = maxBatchSize();
-        factory_params.eos_token_id    = special_tokens_.eos_token_id;
-
-        auto factory_result = LogitsProcessorFactory::createLogitsProcessors(factory_params);
+    if (resource_context.logits_processor_factory) {
+        auto factory_result = resource_context.logits_processor_factory->createLogitsProcessors(
+            generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
         if (!factory_result.ok()) {
             const auto& err = factory_result.status();
             reportErrorWithoutLock(err.code(), err.ToString());
         } else {
             logits_processor_list_ = std::move(factory_result.value());
-            // Keep stream-owned processors non-null so later update/poll loops can dereference directly.
-            logits_processor_list_.erase(std::remove(logits_processor_list_.begin(), logits_processor_list_.end(), nullptr),
-                                         logits_processor_list_.end());
+            // Keep stream-owned processors non-null so later update loops can dereference directly.
+            logits_processor_list_.erase(
+                std::remove(logits_processor_list_.begin(), logits_processor_list_.end(), nullptr),
+                logits_processor_list_.end());
         }
+    } else {
+        RTP_LLM_LOG_DEBUG("GenerateStream: logits processor factory is not initialized; skip logits processors");
     }
 
     if (generateConfig()->random_seed.has_value()) {
@@ -761,10 +758,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
-    // Spec verify processors may have recorded an error while masking logits in the previous
-    // sampler tick, before this stream update reacquires the stream mutex. Promote that processor
-    // error to the stream state before accepting the verified target/draft tokens.
-    pollLogitsProcessorErrors();
+    if (update_info.error_info.has_value()) {
+        const auto& error = update_info.error_info.value();
+        reportErrorWithoutLock(error.code(), error.ToString());
+        return;
+    }
     if (hasError() && !update_info.force_update_info) {
         return;
     }
@@ -825,7 +823,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // before step 2 builds the verify mask, and mismatches surface as hasError().
     const int committed_num_new_tokens = commit_result.committed_num_new_tokens;
     if (committed_num_new_tokens > 0) {
-        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), /*stateful_only=*/true);
+        auto processor_error =
+            updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), /*stateful_only=*/true);
+        if (processor_error.has_value()) {
+            reportErrorWithoutLock(processor_error->code(), processor_error->ToString());
+            return;
+        }
     }
     validateStatefulLogitsProcessorState();
     if (hasError()) {
@@ -856,10 +859,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
-    // Logits processors run during sampling and store errors on themselves instead of throwing
-    // through the sampler path. Poll at the update boundary so a processor failure becomes a
-    // stream error before we commit sampled tokens or publish output.
-    pollLogitsProcessorErrors();
+    if (update_info.error_info.has_value()) {
+        const auto& error = update_info.error_info.value();
+        reportErrorWithoutLock(error.code(), error.ToString());
+        return;
+    }
     if (hasError() && !update_info.force_update_info) {
         return;
     }
@@ -878,10 +882,14 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
 
     // Validate before publishing so stateful-processor mismatches block bad output.
     if (committed_num_new_tokens > 0) {
-        updateLogitProcessorStatus(update_info.new_tokens,
-                                   committed_num_new_tokens,
-                                   update_info.src_batch_indices,
-                                   /*stateful_only=*/was_done);
+        auto processor_error = updateLogitProcessorStatus(update_info.new_tokens,
+                                                          committed_num_new_tokens,
+                                                          update_info.src_batch_indices,
+                                                          /*stateful_only=*/was_done);
+        if (processor_error.has_value()) {
+            reportErrorWithoutLock(processor_error->code(), processor_error->ToString());
+            return;
+        }
         validateStatefulLogitsProcessorState();
         if (hasError()) {
             return;
@@ -971,26 +979,25 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
     }
 }
 
-void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
+std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    updateLogitProcessorStatus(update_info.new_tokens,
-                               update_info.num_new_tokens,
-                               update_info.src_batch_indices,
-                               /*stateful_only=*/false);
+    return updateLogitProcessorStatus(update_info.new_tokens,
+                                      update_info.num_new_tokens,
+                                      update_info.src_batch_indices,
+                                      /*stateful_only=*/false);
 }
 
-void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
-                                                int32_t              num_new_tokens,
-                                                const torch::Tensor& src_batch_indices,
-                                                bool                 stateful_only) {
+std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                                                    int32_t              num_new_tokens,
+                                                                    const torch::Tensor& src_batch_indices,
+                                                                    bool                 stateful_only) {
     RTP_LLM_PROFILE_FUNCTION();
     updateLogitProcessorMultiSeqStatus(src_batch_indices);
 
     if (new_tokens.size(0) != currentBatchSize()) {
-        reportErrorWithoutLock(ErrorCode::EXECUTION_EXCEPTION,
-                               "updateLogitProcessorStatus: new_tokens.size(0)=" + std::to_string(new_tokens.size(0))
-                                   + " != currentBatchSize()=" + std::to_string(currentBatchSize()));
-        return;
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                         "updateLogitProcessorStatus: new_tokens.size(0)=" + std::to_string(new_tokens.size(0))
+                             + " != currentBatchSize()=" + std::to_string(currentBatchSize()));
     }
 
     // Notify processors about newly committed tokens so token-dependent constraints observe the same sequence
@@ -999,30 +1006,12 @@ void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
         if (stateful_only && !p->isStateful()) {
             continue;
         }
-        // updateStatus stores any error on the processor itself (no throws).
-        p->updateStatus(new_tokens, num_new_tokens);
-    }
-    // updateStatus can fail while advancing stateful processor state for the just-committed tokens.
-    // Convert that deferred processor error to a stream error before later validation/output uses
-    // the advanced state.
-    pollLogitsProcessorErrors();
-}
-
-void GenerateStream::pollLogitsProcessorErrors() {
-    // hasError() flips first, then reportEvent records the state. The hasError()
-    // shortcut just avoids re-walking the list once we've already routed an error.
-    if (hasError()) {
-        return;
-    }
-    // Processors may record errors while building masks outside the stream update path.
-    // Promote the first one to stream error state so schedulers/frontend stop and report it uniformly.
-    for (const auto& p : logits_processor_list_) {
-        if (p->hasError()) {
-            const auto err = p->error();
-            reportErrorWithoutLock(err.code(), err.ToString());
-            return;
+        auto error = p->updateStatus(new_tokens, num_new_tokens);
+        if (error.has_value()) {
+            return error;
         }
     }
+    return std::nullopt;
 }
 
 void GenerateStream::validateStatefulLogitsProcessorState() {

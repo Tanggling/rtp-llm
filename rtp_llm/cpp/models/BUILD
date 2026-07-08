@@ -77,6 +77,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/utils:core_utils",

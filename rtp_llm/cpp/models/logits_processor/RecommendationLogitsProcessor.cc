@@ -111,7 +111,8 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     return processor_ptr;
 }
 
-void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+std::optional<ErrorInfo>
+RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     const size_t batch_size = finish_idx - start_idx;
     RTP_LLM_CHECK(batch_size == size());
 
@@ -140,7 +141,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
         }
     }
     if (!need_ban_process && !need_diverge_process) {
-        return;
+        return std::nullopt;
     }
 
     auto         logits     = inputs.logits.narrow(0, start_idx, batch_size);
@@ -240,6 +241,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
         }
     }
+    return std::nullopt;
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
@@ -298,7 +300,8 @@ bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& in
     }
 }
 
-void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+std::optional<ErrorInfo> RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens,
+                                                                     int32_t              num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens.dim());
     // 明确 sampler 输出契约:仅接受 int32,避免 dtype 变动后 data_ptr<int>() 静默读错字节。
     RTP_LLM_CHECK(new_tokens.scalar_type() == torch::kInt32);
@@ -366,7 +369,6 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
 
         info.current_output_length += num_new_tokens;
     }
-
     // 跨序列增量广播（非对称模式）：将其他序列本步新完成的 combo 插入非主序列
     // 设计意图（primary-protected）：序列 0（主序列）仅保留自身产生的 banned_combos，不接收其他
     // 序列的 ban。补充序列接收所有其他序列的新增 combo，确保彼此不重复。
@@ -382,6 +384,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
             }
         }
     }
+    return std::nullopt;
 }
 
 }  // namespace rtp_llm

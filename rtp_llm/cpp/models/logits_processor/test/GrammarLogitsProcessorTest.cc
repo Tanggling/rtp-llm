@@ -129,6 +129,11 @@ constexpr int kX   = 'x';  // token id 120
 constexpr int kEos = 0;    // stop token in makeAsciiTokenizerInfo
 constexpr int kZ   = 'z';  // structural-tag think end in makeReasoningStructuralTag
 
+int expectCapOk(ErrorResult<int>&& result) {
+    EXPECT_TRUE(result.ok()) << result.status().ToString();
+    return result.ok() ? result.value() : -1;
+}
+
 }  // namespace
 
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
@@ -137,13 +142,13 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
 
     auto logits = torch::zeros({1, 128}, torch::kFloat32);
     auto inputs = makeSamplerInputs(logits);
-    proc->process(inputs, 0, 1);
+    auto error = proc->process(inputs, 0, 1);
 
     auto values = logitsVec(logits);
     expectTokenAllowed(values, kA);
     expectTokenMasked(values, kB);
     expectTokenMasked(values, kX);
-    EXPECT_FALSE(proc->hasError());
+    EXPECT_FALSE(error.has_value());
 }
 
 TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesDecodeMaskState) {
@@ -151,13 +156,14 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesDecodeMaskState) {
     auto            proc = makeProcessor(backend, "ab");
 
     auto token_a = torch::tensor({kA}, torch::kInt32).reshape({1, 1});
-    proc->updateStatus(token_a, 1);
+    auto update_error = proc->updateStatus(token_a, 1);
     EXPECT_EQ(proc->committedOutputLen(), 1);
-    ASSERT_FALSE(proc->hasError());
+    ASSERT_FALSE(update_error.has_value());
 
     auto logits = torch::zeros({1, 128}, torch::kFloat32);
     auto inputs = makeSamplerInputs(logits);
-    proc->process(inputs, 0, 1);
+    auto process_error = proc->process(inputs, 0, 1);
+    ASSERT_FALSE(process_error.has_value());
 
     auto values = logitsVec(logits);
     expectTokenMasked(values, kA);
@@ -169,22 +175,22 @@ TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
     XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
     auto            proc = makeProcessor(backend, "ab");
 
-    proc->updateStatus(torch::tensor({kA}, torch::kInt32).reshape({1, 1}), 1);
-    proc->updateStatus(torch::tensor({kB}, torch::kInt32).reshape({1, 1}), 1);
-    ASSERT_FALSE(proc->hasError());
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({kA}, torch::kInt32).reshape({1, 1}), 1).has_value());
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({kB}, torch::kInt32).reshape({1, 1}), 1).has_value());
     EXPECT_EQ(proc->committedOutputLen(), 2);
     EXPECT_TRUE(matcherTerminated(*proc.matcher));
 
     auto logits = torch::zeros({1, 128}, torch::kFloat32);
     auto inputs = makeSamplerInputs(logits);
-    proc->process(inputs, 0, 1);
+    auto process_error = proc->process(inputs, 0, 1);
+    ASSERT_FALSE(process_error.has_value());
 
     auto values = logitsVec(logits);
     expectTokenAllowed(values, kEos);
     expectTokenMasked(values, kA);
     expectTokenMasked(values, kB);
 
-    proc->updateStatus(torch::tensor({kEos}, torch::kInt32).reshape({1, 1}), 1);
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({kEos}, torch::kInt32).reshape({1, 1}), 1).has_value());
     EXPECT_EQ(proc->committedOutputLen(), 3);
     EXPECT_TRUE(proc.matcher->finished());
 }
@@ -193,10 +199,10 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusReportsInvalidCommittedToken) {
     XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
     auto            proc = makeProcessor(backend, "ab");
 
-    proc->updateStatus(torch::tensor({kX}, torch::kInt32).reshape({1, 1}), 1);
+    auto error = proc->updateStatus(torch::tensor({kX}, torch::kInt32).reshape({1, 1}), 1);
 
-    ASSERT_TRUE(proc->hasError());
-    EXPECT_EQ(proc->error().code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
     EXPECT_EQ(proc->committedOutputLen(), 0);
 }
 
@@ -218,7 +224,7 @@ TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int cap = proc->tryAcceptAndFillBitmask(req);
+    const int cap = expectCapOk(proc->tryAcceptAndFillBitmask(req));
     EXPECT_EQ(cap, propose_step) << "every draft token is grammar-legal";
     EXPECT_TRUE(rowAllows(bm, words, 0, kA)) << "row 0 must allow 'a'";
     EXPECT_FALSE(rowAllows(bm, words, 0, kB)) << "row 0 must NOT allow 'b' at the start";
@@ -242,7 +248,7 @@ TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int cap = proc->tryAcceptAndFillBitmask(req);
+    const int cap = expectCapOk(proc->tryAcceptAndFillBitmask(req));
     EXPECT_EQ(cap, 1) << "draft[1]='x' is illegal after 'a', so cap == 1";
 }
 
@@ -266,7 +272,11 @@ TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
     req.vocab_size         = 128;
 
     int cap = 0;
-    ASSERT_NO_THROW({ cap = proc->tryAcceptAndFillBitmask(req); });
+    ASSERT_NO_THROW({
+        auto cap_or = proc->tryAcceptAndFillBitmask(req);
+        ASSERT_TRUE(cap_or.ok()) << cap_or.status().ToString();
+        cap = cap_or.value();
+    });
     EXPECT_EQ(cap, 2) << "grammar completes after 'ab'; trailing draft must not advance matcher";
     EXPECT_FALSE(matcherTerminated(*proc.matcher)) << "provisional accepts must roll back committed matcher state";
     // Unfilled rows stay at allow-all (init + fill_row never reached offset 2+).
@@ -289,7 +299,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int cap = proc->tryAcceptAndFillBitmask(req);
+    const int cap = expectCapOk(proc->tryAcceptAndFillBitmask(req));
     EXPECT_EQ(cap, 2);
     EXPECT_FALSE(matcherTerminated(*proc.matcher));
 }
@@ -314,7 +324,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
+    EXPECT_EQ(expectCapOk(proc->tryAcceptAndFillBitmask(req)), 0);
     EXPECT_TRUE(matcherTerminated(*proc.matcher));
 }
 
@@ -337,8 +347,8 @@ TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int r1 = proc->tryAcceptAndFillBitmask(req);
-    const int r2 = proc->tryAcceptAndFillBitmask(req);
+    const int r1 = expectCapOk(proc->tryAcceptAndFillBitmask(req));
+    const int r2 = expectCapOk(proc->tryAcceptAndFillBitmask(req));
     EXPECT_EQ(r1, r2) << "state must be unchanged across calls (rollback)";
 }
 
@@ -358,7 +368,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
+    EXPECT_EQ(expectCapOk(proc->tryAcceptAndFillBitmask(req)), 0);
 }
 
 // Undersized bitmask buffer must error out as GRAMMAR_BITMASK_BUFFER_TOO_SMALL, not corrupt the caller's heap.
@@ -379,9 +389,9 @@ TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
-    ASSERT_TRUE(proc->hasError());
-    EXPECT_EQ(proc->error().code(), ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL);
+    auto cap_or = proc->tryAcceptAndFillBitmask(req);
+    ASSERT_FALSE(cap_or.ok());
+    EXPECT_EQ(cap_or.status().code(), ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL);
 }
 
 TEST(GrammarLogitsProcessorTest, ClearBitmaskTokenRangeClearsFullWordsAndEdges) {
@@ -414,7 +424,7 @@ TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesEndAndFinalGr
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int cap = proc->tryAcceptAndFillBitmask(req);
+    const int cap = expectCapOk(proc->tryAcceptAndFillBitmask(req));
     EXPECT_EQ(cap, propose_step);
 
     // Before budget is consumed, xgrammar permits ordinary think content.
@@ -451,7 +461,7 @@ TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesTokenEndAndFi
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int cap = proc->tryAcceptAndFillBitmask(req);
+    const int cap = expectCapOk(proc->tryAcceptAndFillBitmask(req));
     EXPECT_EQ(cap, propose_step);
 
     EXPECT_TRUE(rowAllows(bm, words, 0, kX));

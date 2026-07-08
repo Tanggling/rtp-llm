@@ -42,8 +42,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
         if (mm_process_engine.is_none()) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
-                                                              maga_init_params.model_config_.max_seq_len,
-                                                              metrics_reporter_));
+                                                              maga_init_params.model_config_.max_seq_len));
         } else {
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,
@@ -117,14 +116,6 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
-    // Loop exit only means the stream is inactive and has no buffered output. It does not
-    // distinguish clean finish from errors reported after the last output was consumed, e.g.
-    // grammar/logits-processor errors. Convert those deferred stream errors to gRPC errors
-    // here; otherwise the client would receive OK and treat the failed request as success.
-    if (stream->hasError()) {
-        return serializeErrorMsg(request_key, stream->statusInfo());
-    }
-
     return grpc::Status::OK;
 }
 
@@ -157,12 +148,6 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             break;
         }
         last_outputs = output_result.value();
-    }
-    // Same as pollStreamOutput: after draining outputs, the stream may still carry a deferred
-    // error reported by the engine or a logits processor. Return it so batch results use
-    // error_info instead of final_output.
-    if (stream->hasError()) {
-        return stream->statusInfo();
     }
     return ErrorInfo::OkStatus();
 }

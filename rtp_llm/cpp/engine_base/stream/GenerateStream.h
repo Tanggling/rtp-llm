@@ -41,6 +41,7 @@ struct StreamUpdateInfo {
     bool                force_update_info      = false;
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
+    std::optional<ErrorInfo> error_info;
 };
 
 struct StreamSpecUpdateInfo {
@@ -53,6 +54,7 @@ struct StreamSpecUpdateInfo {
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
+    std::optional<ErrorInfo> error_info;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -561,13 +563,11 @@ protected:
     bool    hasStatefulLogitsProcessor() const;
     int64_t processorAcceptedTokenLen() const;
     void    updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
-    void    updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
-    void    updateLogitProcessorStatus(const torch::Tensor& new_tokens,
-                                       int32_t              num_new_tokens,
-                                       const torch::Tensor& src_batch_indices,
-                                       bool                 stateful_only);
-    // Caller must already hold mutex_. Routes the first processor error to this stream.
-    void pollLogitsProcessorErrors();
+    std::optional<ErrorInfo> updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                                        int32_t              num_new_tokens,
+                                                        const torch::Tensor& src_batch_indices,
+                                                        bool                 stateful_only);
     void validateStatefulLogitsProcessorState();
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);

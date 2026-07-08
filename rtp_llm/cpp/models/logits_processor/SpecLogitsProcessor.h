@@ -31,8 +31,8 @@ public:
 
     virtual bool isSpecVerifyEligible() const = 0;
 
-    // Returns accept cap in [0, propose_step]; on failure stashes ErrorInfo and returns 0.
-    virtual int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) = 0;
+    // Returns accept cap in [0, propose_step]; business failures come back as ErrorInfo.
+    virtual ErrorResult<int> tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) = 0;
 
     static size_t bitmaskWordCount(size_t vocab_size) {
         return (vocab_size + 31) / 32;
