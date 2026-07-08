@@ -14,24 +14,27 @@ from rtp_llm.config.grammar_constraint import (
 )
 from rtp_llm.config.response_format import parse_response_format
 
-DEFAULT_THINK_END_TAG = "</think>\n\n"
-
 
 @dataclass(frozen=True)
 class ReasoningFormat:
     """Server/model resolved reasoning envelope format used for grammar wrapping."""
 
-    tag_end: Union[str, List[str], Dict[str, Any]] = DEFAULT_THINK_END_TAG
+    tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
-        raw_tag = generate_env_config.think_end_tag or DEFAULT_THINK_END_TAG
-        tag = str(raw_tag).encode("utf-8").decode("unicode_escape")
         raw_token_id = generate_env_config.think_end_token_id
         token_id = -1 if raw_token_id is None else int(raw_token_id)
         if token_id != -1:
             return cls(tag_end={"type": "token", "token": int(token_id)})
+        raw_tag = generate_env_config.think_end_tag
+        if raw_tag is None:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "think_end_tag is required when think_end_token_id is not set",
+            )
+        tag = str(raw_tag).encode("utf-8").decode("unicode_escape")
         return cls(tag_end=tag)
 
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
@@ -60,7 +63,7 @@ class ResponseFormatBuilder:
 
     def __init__(self, config: Any, reasoning_format: Optional[ReasoningFormat] = None):
         self.config = config
-        self.reasoning_format = reasoning_format or ReasoningFormat()
+        self.reasoning_format = reasoning_format
 
     def apply(self) -> None:
         constraint = self._resolve_grammar_constraint()
@@ -70,6 +73,12 @@ class ResponseFormatBuilder:
 
         if self._existing_reasoning_envelope_final_format() is not None:
             return
+
+        if self.reasoning_format is None:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "reasoning_format is required when in_think_mode is enabled",
+            )
 
         if constraint is not None:
             self._wrap_grammar_with_reasoning_envelope(constraint)
@@ -224,6 +233,7 @@ class ResponseFormatBuilder:
     def _wrap_final_format_with_reasoning_envelope(
         self, final_format: Dict[str, Any]
     ) -> None:
+        assert self.reasoning_format is not None
         reasoning_prefix = self.reasoning_format.prefix_format(
             self.config.max_thinking_tokens
         )

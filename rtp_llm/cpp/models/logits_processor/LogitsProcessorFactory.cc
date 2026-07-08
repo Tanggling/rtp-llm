@@ -66,7 +66,7 @@ void LogitsProcessorFactory::init(const ModelConfig&   model_config,
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,
-                                               int32_t,
+                                               int32_t                        max_batch_size,
                                                int64_t                        eos_token_id) {
     std::vector<BaseLogitsProcessorPtr> result;
 

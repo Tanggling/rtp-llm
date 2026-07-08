@@ -849,17 +849,19 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prepare_streams(stream_size=%zu)", streams.size());
 
     for (auto& stream : streams) {
+        const bool is_context_stream = stream->isContextStream();
+        if (!is_context_stream && hasMtpIncompatibleProcessor(stream)) {
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "MTP decode requires score-batch/spec-verify capable logits processors; "
+                                "found normal-decode-only logits processor; disable MTP or disable the "
+                                "incompatible logits processor");
+            continue;
+        }
+
         // split streams into prefill and decode
-        if (stream->isContextStream()) {
+        if (is_context_stream) {
             prefill_streams.push_back(stream);
         } else {
-            if (hasMtpIncompatibleProcessor(stream)) {
-                stream->reportError(ErrorCode::INVALID_PARAMS,
-                                    "MTP decode requires score-batch/spec-verify capable logits processors; "
-                                    "found normal-decode-only logits processor; disable MTP or disable the "
-                                    "incompatible logits processor");
-                continue;
-            }
             stream->setScoreLen(propose_step_ + 1);
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
                 auto sp_output_buffer = makeFakeSPOutputBuffer(data_type_, hidden_size_, vocab_size_, propose_step_);
