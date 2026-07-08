@@ -14,9 +14,7 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include <cstdint>
 #include <iterator>
-#include <memory>
 #include <mutex>
 #include <optional>
 
@@ -104,10 +102,11 @@ public:
                    kmonitor::MetricsReporterPtr          metrics_reporter,
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
-    // Out-of-line so that include-heavy member destruction (stream cache
-    // resource, complete-token-ids, etc.) doesn't pull every dependent
-    // header into call sites of `~GenerateStreamPtr`.
-    virtual ~GenerateStream();
+    virtual ~GenerateStream() {
+        reportMetric();
+        releaseResource();
+        stream_magic_ = 0;
+    }
 
     bool isStreamAlive() const {
         return stream_magic_ == STREAM_MAGIC;
@@ -130,8 +129,7 @@ public:
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
-
-    bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -450,7 +448,7 @@ public:
         return generate_input_->begin_time_us;
     }
 
-    const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
+    std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
 
@@ -543,6 +541,7 @@ public:
 protected:
     bool    hasStatefulLogitsProcessor() const;
     int64_t processorAcceptedTokenLen() const;
+    void    initLogitsProcessors(const ResourceContext& resource_context, size_t init_batch_size);
     void    updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens,
