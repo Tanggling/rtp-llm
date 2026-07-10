@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Sequence, Tuple
 
 
 def _build_encoded_vocab(vocab: Dict[str, int], model_vocab_size: int) -> Tuple[List[str], int]:
@@ -27,12 +27,17 @@ def _build_encoded_vocab(vocab: Dict[str, int], model_vocab_size: int) -> Tuple[
 
 
 def _get_hf_tokenizer_json(tokenizer: Any) -> str:
-    backend_tokenizer = getattr(tokenizer, "backend_tokenizer", None)
-    if backend_tokenizer is None or not hasattr(backend_tokenizer, "to_str"):
+    try:
+        to_str = tokenizer.backend_tokenizer.to_str
+    except AttributeError as error:
+        raise ValueError(
+            f"tokenizer {type(tokenizer)} does not expose backend_tokenizer.to_str()"
+        ) from error
+    if not callable(to_str):
         raise ValueError(
             f"tokenizer {type(tokenizer)} does not expose backend_tokenizer.to_str()"
         )
-    return backend_tokenizer.to_str()
+    return to_str()
 
 
 def _is_fast_tokenizer(tokenizer: Any) -> bool:
@@ -44,18 +49,39 @@ def _is_fast_tokenizer(tokenizer: Any) -> bool:
 
 
 def _is_tiktoken_tokenizer(tokenizer: Any) -> bool:
-    inner_tokenizer = getattr(tokenizer, "tokenizer", None)
+    return (
+        _has_tiktoken_encoding(tokenizer)
+        or _has_tiktoken_vocab_file(tokenizer)
+        or _has_mergeable_ranks(tokenizer)
+    )
+
+
+def _has_tiktoken_encoding(tokenizer: Any) -> bool:
+    try:
+        inner_tokenizer = tokenizer.tokenizer
+    except AttributeError:
+        return False
     inner_type = type(inner_tokenizer)
-    has_tiktoken_encoding = (
+    return (
         inner_type.__name__ == "Encoding"
         and inner_type.__module__.split(".", 1)[0] == "tiktoken"
     )
-    filename_pattern = (
-        hasattr(tokenizer, "vocab_files_names")
-        and "vocab_file" in tokenizer.vocab_files_names
-        and "tiktoken" in tokenizer.vocab_files_names["vocab_file"]
-    )
-    return has_tiktoken_encoding or filename_pattern or hasattr(tokenizer, "mergeable_ranks")
+
+
+def _has_tiktoken_vocab_file(tokenizer: Any) -> bool:
+    try:
+        vocab_file = tokenizer.vocab_files_names["vocab_file"]
+        return "tiktoken" in vocab_file
+    except (AttributeError, KeyError, TypeError):
+        return False
+
+
+def _has_mergeable_ranks(tokenizer: Any) -> bool:
+    try:
+        tokenizer.mergeable_ranks
+    except AttributeError:
+        return False
+    return True
 
 
 def _is_byte_level_tokenizer(tokenizer: Any) -> bool:
@@ -67,18 +93,39 @@ def _is_byte_level_tokenizer(tokenizer: Any) -> bool:
 
 
 def _is_sentencepiece_tokenizer(tokenizer: Any) -> bool:
-    candidates = [
-        getattr(tokenizer, "sp_model", None),
-        getattr(getattr(tokenizer, "tokenizer", None), "sp_model", None),
-        getattr(tokenizer, "tok", None),
-    ]
     return any(
-        candidate is not None
-        and callable(getattr(candidate, "PieceToId", None))
-        and callable(getattr(candidate, "IdToPiece", None))
-        and callable(getattr(candidate, "vocab_size", None))
-        for candidate in candidates
+        _has_sentencepiece_api(candidate)
+        for candidate in _iter_sentencepiece_candidates(tokenizer)
     )
+
+
+def _iter_sentencepiece_candidates(tokenizer: Any) -> Iterator[Any]:
+    try:
+        yield tokenizer.sp_model
+    except AttributeError:
+        pass
+
+    try:
+        yield tokenizer.tokenizer.sp_model
+    except AttributeError:
+        pass
+
+    try:
+        yield tokenizer.tok
+    except AttributeError:
+        pass
+
+
+def _has_sentencepiece_api(candidate: Any) -> bool:
+    if candidate is None:
+        return False
+    try:
+        piece_to_id = candidate.PieceToId
+        id_to_piece = candidate.IdToPiece
+        vocab_size = candidate.vocab_size
+    except AttributeError:
+        return False
+    return callable(piece_to_id) and callable(id_to_piece) and callable(vocab_size)
 
 
 def build_grammar_tokenizer_info_json(
