@@ -236,10 +236,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const Ve
 
 SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTask& task) {
     RTP_LLM_PROFILE_SCOPE("spec_logits_verify_runner.run");
-    LaunchResult result;
 
     if (task.active.empty()) {
-        return result;
+        return LaunchResult{};
     }
 
     const size_t B = task.total_streams;
