@@ -515,6 +515,15 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
+bool GenerateStream::reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info) {
+    if (!error_info.has_value()) {
+        return false;
+    }
+    const auto& error = error_info.value();
+    reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
+    return true;
+}
+
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
@@ -712,9 +721,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
-    if (update_info.error_info.has_value()) {
-        const auto& error = update_info.error_info.value();
-        reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
+    if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
     if (hasError() && !update_info.force_update_info) {
@@ -812,9 +819,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
-    if (update_info.error_info.has_value()) {
-        const auto& error = update_info.error_info.value();
-        reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
+    if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
     if (hasError() && !update_info.force_update_info) {
@@ -886,46 +891,12 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
     return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
 }
 
-bool GenerateStream::hasStatefulLogitsProcessor() const {
-    // Stateful processors, e.g. grammar constraints, remember accepted tokens across decode steps.
-    // Their internal state must be advanced whenever this stream commits output tokens.
-    for (const auto& p : logits_processor_list_) {
-        if (p->isStateful()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-ErrorResult<int64_t> GenerateStream::processorAcceptedTokenLen() const {
-    int64_t accepted_token_len = -1;
-    // All stateful processors must agree on how many output tokens they have accepted.
-    // A mismatch means the stream and processor state diverged, so later masks may be built from stale state.
-    for (const auto& p : logits_processor_list_) {
-        if (!p->isStateful()) {
-            continue;
-        }
-        const auto processor_token_len = p->committedOutputLen();
-        if (accepted_token_len < 0) {
-            accepted_token_len = processor_token_len;
-            continue;
-        }
-        if (accepted_token_len != processor_token_len) {
-            return ErrorInfo(ErrorCode::UNKNOWN_ERROR,
-                             "stateful logits processor accepted token length mismatch between processors: first="
-                                 + std::to_string(accepted_token_len)
-                                 + ", current=" + std::to_string(processor_token_len));
-        }
-    }
-    return accepted_token_len < 0 ? ErrorResult<int64_t>(0) : ErrorResult<int64_t>(std::move(accepted_token_len));
-}
-
 std::optional<ErrorInfo> GenerateStream::commitStatefulTokens(const torch::Tensor& new_tokens,
                                                               int32_t              num_new_tokens) {
     if (num_new_tokens <= 0) {
         return std::nullopt;
     }
-    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+    for (const auto& logit_processor_ptr : logits_processor_list_) {
         if (!logit_processor_ptr->isStateful()) {
             continue;
         }
@@ -947,7 +918,7 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
     std::vector<int> src_batch_indices_vec(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(src_batch_indices_vec.size() == currentBatchSize());
 
-    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+    for (const auto& logit_processor_ptr : logits_processor_list_) {
         logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
@@ -960,7 +931,7 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const Stream
     RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
     auto num_new_tokens = update_info.num_new_tokens;
 
-    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+    for (const auto& logit_processor_ptr : logits_processor_list_) {
         auto error = logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
         if (error.has_value()) {
             return error;
@@ -970,21 +941,25 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const Stream
 }
 
 std::optional<ErrorInfo> GenerateStream::validateStatefulLogitsProcessorState() {
-    if (!hasStatefulLogitsProcessor() || hasError()) {
+    if (hasError()) {
         return std::nullopt;
     }
-    const auto processor_token_len = processorAcceptedTokenLen();
-    if (!processor_token_len.ok()) {
-        return processor_token_len.status();
+
+    const auto stream_output_len = static_cast<int64_t>(outputTokenLen());
+    for (size_t i = 0; i < logits_processor_list_.size(); ++i) {
+        const auto& processor = logits_processor_list_[i];
+        if (!processor->isStateful()) {
+            continue;
+        }
+        const auto processor_output_len = processor->committedOutputLen();
+        if (processor_output_len != stream_output_len) {
+            return ErrorInfo(ErrorCode::UNKNOWN_ERROR,
+                             "stateful logits processor committed output length mismatch: processor_index="
+                                 + std::to_string(i) + ", processor=" + std::to_string(processor_output_len)
+                                 + ", stream_output=" + std::to_string(stream_output_len));
+        }
     }
-    const auto stream_output_len   = static_cast<int64_t>(outputTokenLen());
-    if (processor_token_len.value() == stream_output_len) {
-        return std::nullopt;
-    }
-    return ErrorInfo(ErrorCode::UNKNOWN_ERROR,
-                     "stateful logits processor accepted token length mismatch: processor="
-                         + std::to_string(processor_token_len.value())
-                         + ", stream_output=" + std::to_string(stream_output_len));
+    return std::nullopt;
 }
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {

@@ -12,39 +12,31 @@
 namespace rtp_llm {
 namespace {
 
-ErrorInfo matcherExceptionError(const char* op, const std::exception& e) {
+ErrorInfo matcherError(const char* op, const char* detail) {
     return ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION,
-                     std::string("grammar matcher ") + op + " exception: " + e.what());
-}
-
-ErrorInfo matcherUnknownError(const char* op) {
-    return ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION, std::string("grammar matcher ") + op + " exception: unknown");
+                     std::string("grammar matcher ") + op + " exception: " + detail);
 }
 
 template<typename Fn>
-auto matcherResult(const char* op, Fn&& fn) -> ErrorResult<std::decay_t<decltype(fn())>> {
-    try {
-        return std::forward<Fn>(fn)();
-    } catch (const std::exception& e) {
-        auto error = matcherExceptionError(op, e);
-        return error;
-    } catch (...) {
-        auto error = matcherUnknownError(op);
-        return error;
-    }
-}
+using MatcherCallResult = std::conditional_t<std::is_void_v<std::invoke_result_t<Fn>>,
+                                             ErrorInfo,
+                                             ErrorResult<std::decay_t<std::invoke_result_t<Fn>>>>;
 
 template<typename Fn>
-ErrorInfo matcherStatus(const char* op, Fn&& fn) {
+auto matcherCall(const char* op, Fn&& fn) -> MatcherCallResult<Fn> {
+    using ValueType = std::invoke_result_t<Fn>;
+
     try {
-        std::forward<Fn>(fn)();
-        return ErrorInfo::OkStatus();
+        if constexpr (std::is_void_v<ValueType>) {
+            std::forward<Fn>(fn)();
+            return ErrorInfo::OkStatus();
+        } else {
+            return std::forward<Fn>(fn)();
+        }
     } catch (const std::exception& e) {
-        auto error = matcherExceptionError(op, e);
-        return error;
+        return matcherError(op, e.what());
     } catch (...) {
-        auto error = matcherUnknownError(op);
-        return error;
+        return matcherError(op, "unknown");
     }
 }
 
@@ -64,7 +56,7 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
 }
 
 ErrorResult<bool> RtpGrammarMatcher::acceptToken(int32_t token_id) {
-    return matcherResult("acceptToken", [&] {
+    return matcherCall("acceptToken", [&] {
         const bool ok = matcher_->AcceptToken(token_id);
         if (!ok) {
             // Spec-verify DFS reacts on the bool; keep at DEBUG to avoid log floods.
@@ -93,25 +85,25 @@ ErrorResult<bool> RtpGrammarMatcher::acceptTokens(const std::vector<int32_t>& to
 }
 
 ErrorResult<bool> RtpGrammarMatcher::fillBitmask(DLTensor* bitmask, int32_t idx) {
-    return matcherResult("fillBitmask", [&] { return matcher_->FillNextTokenBitmask(bitmask, idx); });
+    return matcherCall("fillBitmask", [&] { return matcher_->FillNextTokenBitmask(bitmask, idx); });
 }
 
 ErrorResult<bool> RtpGrammarMatcher::isTerminated() const {
-    return matcherResult("isTerminated", [&] { return matcher_->IsTerminated(); });
+    return matcherCall("isTerminated", [&] { return matcher_->IsTerminated(); });
 }
 
 ErrorInfo RtpGrammarMatcher::rollback(int n) {
     if (n <= 0) {
         return ErrorInfo::OkStatus();
     }
-    return matcherStatus("rollback", [&] {
+    return matcherCall("rollback", [&] {
         matcher_->Rollback(n);
         num_accepted_ = std::max<int64_t>(0, num_accepted_ - n);
     });
 }
 
 ErrorResult<int32_t> RtpGrammarMatcher::vocabSize() const {
-    return matcherResult("vocabSize", [&] { return compiled_->GetTokenizerInfo().GetVocabSize(); });
+    return matcherCall("vocabSize", [&] { return compiled_->GetTokenizerInfo().GetVocabSize(); });
 }
 
 }  // namespace rtp_llm

@@ -448,7 +448,7 @@ public:
         return generate_input_->begin_time_us;
     }
 
-    std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
+    const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
 
@@ -539,8 +539,7 @@ public:
     bool     queryPdSep() const;
 
 protected:
-    bool    hasStatefulLogitsProcessor() const;
-    ErrorResult<int64_t> processorAcceptedTokenLen() const;
+    bool    reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     std::optional<ErrorInfo> commitStatefulTokens(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void    updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
