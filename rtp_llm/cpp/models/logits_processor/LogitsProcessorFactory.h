@@ -20,7 +20,7 @@ public:
                      const GrammarConfig& grammar_config,
                      const std::string&   tree_decode_config);
 
-    static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
+    static ErrorResult<LogitsProcessors>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                            int32_t init_batch_size,
                            int32_t max_batch_size,

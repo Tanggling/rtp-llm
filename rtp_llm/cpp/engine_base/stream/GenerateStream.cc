@@ -89,7 +89,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
         generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
     if (processors_result.ok()) {
-        logits_processor_list_ = std::move(processors_result.value());
+        logits_processors_ = std::move(processors_result.value());
     } else {
         const auto& err = processors_result.status();
         reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());
@@ -896,11 +896,8 @@ std::optional<ErrorInfo> GenerateStream::commitStatefulTokens(const torch::Tenso
     if (num_new_tokens <= 0) {
         return std::nullopt;
     }
-    for (const auto& logit_processor_ptr : logits_processor_list_) {
-        if (!logit_processor_ptr->isStateful()) {
-            continue;
-        }
-        auto error = logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
+    for (const auto& logit_processor_ptr : logits_processors_.statefulProcessors()) {
+        auto error = logit_processor_ptr->commitTokens(new_tokens, num_new_tokens);
         if (error.has_value()) {
             return error;
         }
@@ -918,7 +915,7 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
     std::vector<int> src_batch_indices_vec(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(src_batch_indices_vec.size() == currentBatchSize());
 
-    for (const auto& logit_processor_ptr : logits_processor_list_) {
+    for (const auto& logit_processor_ptr : logits_processors_.normalProcessors()) {
         logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
@@ -931,7 +928,7 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const Stream
     RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
     auto num_new_tokens = update_info.num_new_tokens;
 
-    for (const auto& logit_processor_ptr : logits_processor_list_) {
+    for (const auto& logit_processor_ptr : logits_processors_.normalProcessors()) {
         auto error = logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
         if (error.has_value()) {
             return error;
@@ -946,11 +943,9 @@ std::optional<ErrorInfo> GenerateStream::validateStatefulLogitsProcessorState() 
     }
 
     const auto stream_output_len = static_cast<int64_t>(outputTokenLen());
-    for (size_t i = 0; i < logits_processor_list_.size(); ++i) {
-        const auto& processor = logits_processor_list_[i];
-        if (!processor->isStateful()) {
-            continue;
-        }
+    const auto& stateful_processors = logits_processors_.statefulProcessors();
+    for (size_t i = 0; i < stateful_processors.size(); ++i) {
+        const auto& processor = stateful_processors[i];
         const auto processor_output_len = processor->committedOutputLen();
         if (processor_output_len != stream_output_len) {
             return ErrorInfo(ErrorCode::UNKNOWN_ERROR,

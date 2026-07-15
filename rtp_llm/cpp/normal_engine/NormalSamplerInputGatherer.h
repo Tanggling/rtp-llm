@@ -7,6 +7,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 
 namespace rtp_llm {
 
@@ -35,11 +36,10 @@ public:
                                   bool                          score_batch = false) const;
 
 private:
-    static void insertProcessorState(LogitsProcessorStatesPtr&                   state_ptr,
-                                     const std::shared_ptr<BaseLogitsProcessor>& processor,
-                                     GenerateStreamPtr&                          stream,
-                                     size_t                                      idx,
-                                     int                                         score_len);
+    static void insertScoreBatchProcessor(LogitsProcessorStatesPtr&            state_ptr,
+                                          const ScoreBatchLogitsProcessorPtr& processor,
+                                          size_t                               idx,
+                                          int                                  score_len);
 };
 
 }  // namespace rtp_llm

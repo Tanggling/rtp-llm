@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -19,19 +19,14 @@ struct SpecLogitsProcessorRequest {
     size_t   vocab_size         = 0;
 };
 
-class SpecLogitsProcessor: public BaseLogitsProcessor {
+// Optional facet implemented by BaseLogitsProcessor subclasses that can preview
+// speculative draft tokens without mutating their committed state.
+class SpecLogitsProcessor {
 public:
-    ~SpecLogitsProcessor() override = default;
+    virtual ~SpecLogitsProcessor() = default;
 
-    // Keep score-batch classification tied to the same eligibility predicate used by
-    // SpecLogitsVerifyRunner, so implementations cannot diverge from the verify path.
-    ScoreBatchRole scoreBatchRole() const final override {
-        return isSpecVerifyEligible() ? ScoreBatchRole::kSpecVerify : ScoreBatchRole::kNormalDecodeOnly;
-    }
-
-    virtual bool isSpecVerifyEligible() const = 0;
-
-    // Returns accept cap in [0, propose_step]; business failures come back as ErrorInfo.
+    // Returns accept cap in [0, propose_step]. Implementations must restore their
+    // committed state before returning; business failures come back as ErrorInfo.
     virtual ErrorResult<int> tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) = 0;
 
     static size_t bitmaskWordCount(size_t vocab_size) {

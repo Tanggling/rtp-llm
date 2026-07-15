@@ -63,12 +63,12 @@ void LogitsProcessorFactory::init(const ModelConfig&   model_config,
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 
-ErrorResult<std::vector<BaseLogitsProcessorPtr>>
+ErrorResult<LogitsProcessors>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,
                                                int32_t                        max_batch_size,
                                                int64_t                        eos_token_id) {
-    std::vector<BaseLogitsProcessorPtr> result;
+    LogitsProcessors result;
 
     auto&         config      = *generate_input->generate_config;
     GrammarKeyCpp grammar_key = keyFromGenerateConfig(config);
@@ -99,23 +99,27 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
         if (!matcher_or.ok()) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(matcher_or.status().message()));
         }
-        result.push_back(
-            std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id));
+        auto grammar_processor =
+            std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id);
+        result.add(grammar_processor,
+                   /*score_batch=*/nullptr,
+                   /*spec=*/grammar_processor,
+                   /*stateful=*/grammar_processor);
     }
 
     auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
     if (tree_processor != nullptr) {
-        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_processor));
+        result.add(tree_processor);
     }
 
     auto rec_processor = RecommendationLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
     if (rec_processor != nullptr) {
-        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(rec_processor));
+        result.add(rec_processor);
     }
 
     auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, eos_token_id);
     if (multi_seq_processor != nullptr) {
-        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_processor));
+        result.add(multi_seq_processor);
     }
 
     return std::move(result);

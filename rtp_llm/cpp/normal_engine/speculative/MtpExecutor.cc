@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
-#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -86,13 +85,7 @@ void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
 }
 
 bool hasMtpIncompatibleProcessor(const GenerateStreamPtr& stream) {
-    if (!stream) {
-        return false;
-    }
-    const auto& processors = stream->getAllLogitsProcessorPtr();
-    return std::any_of(processors.begin(), processors.end(), [](const auto& processor) {
-        return processor && processor->scoreBatchRole() == ScoreBatchRole::kNormalDecodeOnly;
-    });
+    return stream && !stream->logitsProcessors().mtpCompatible();
 }
 
 }  // namespace
@@ -850,7 +843,9 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
 
     for (auto& stream : streams) {
         const bool is_context_stream = stream->isContextStream();
-        if (!is_context_stream && hasMtpIncompatibleProcessor(stream)) {
+        // Capability compatibility is a stream admission property, so reject it
+        // before either prefill or decode can publish an output token.
+        if (hasMtpIncompatibleProcessor(stream)) {
             stream->reportError(ErrorCode::INVALID_PARAMS,
                                 "MTP decode requires score-batch/spec-verify capable logits processors; "
                                 "found normal-decode-only logits processor; disable MTP or disable the "
@@ -1052,14 +1047,8 @@ MtpExecutor::runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams, co
 
     size_t stream_idx = 0;
     for (const auto& stream : streams) {
-        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            if (!processor || processor->scoreBatchRole() != ScoreBatchRole::kSpecVerify) {
-                continue;
-            }
-            auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
-            RTP_LLM_CHECK_WITH_INFO(spec_processor != nullptr,
-                                    "scoreBatchRole()==kSpecVerify requires SpecLogitsProcessor");
-            task.active.push_back({spec_processor, stream_idx});
+        for (const auto& processor : stream->logitsProcessors().specProcessors()) {
+            task.active.push_back({processor, stream_idx});
         }
         ++stream_idx;
     }

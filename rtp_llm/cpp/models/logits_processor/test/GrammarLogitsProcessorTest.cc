@@ -17,6 +17,10 @@
 #include <xgrammar/tokenizer_info.h>
 
 namespace rtp_llm {
+
+static_assert(std::is_base_of_v<BaseLogitsProcessor, GrammarLogitsProcessor>);
+static_assert(std::is_base_of_v<SpecLogitsProcessor, GrammarLogitsProcessor>);
+static_assert(std::is_base_of_v<StatefulLogitsProcessor, GrammarLogitsProcessor>);
 namespace {
 
 xgrammar::TokenizerInfo makeAsciiTokenizerInfo() {

@@ -17,6 +17,7 @@
 #include <iterator>
 #include <mutex>
 #include <optional>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -449,7 +450,21 @@ public:
     }
 
     const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
-        return logits_processor_list_;
+        return logits_processors_.normalProcessors();
+    }
+
+    const LogitsProcessors& logitsProcessors() const {
+        return logits_processors_;
+    }
+
+    // Processor capabilities are normally installed by LogitsProcessorFactory
+    // during stream construction. This explicit hook also supports embedders and
+    // tests without exposing the plan's internal typed lists.
+    void installLogitsProcessor(BaseLogitsProcessorPtr               normal,
+                                ScoreBatchLogitsProcessorPtr         score_batch = nullptr,
+                                std::shared_ptr<SpecLogitsProcessor> spec        = nullptr,
+                                StatefulLogitsProcessorPtr           stateful    = nullptr) {
+        logits_processors_.add(std::move(normal), std::move(score_batch), std::move(spec), std::move(stateful));
     }
 
     at::Generator getGenerator() {
@@ -639,8 +654,8 @@ protected:
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
 
-    std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
-    at::Generator                       generator_;
+    LogitsProcessors logits_processors_;
+    at::Generator    generator_;
 
     // just for bool test
     bool perf_test_ = false;

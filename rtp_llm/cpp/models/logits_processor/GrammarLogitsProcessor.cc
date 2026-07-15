@@ -472,6 +472,11 @@ GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, s
 
 std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens,
                                                               int32_t              num_new_tokens) {
+    return commitTokens(new_tokens, num_new_tokens);
+}
+
+std::optional<ErrorInfo> GrammarLogitsProcessor::commitTokens(const torch::Tensor& new_tokens,
+                                                              int32_t              num_new_tokens) {
     if (!matcher_) {
         return std::nullopt;
     }
@@ -495,10 +500,6 @@ std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tenso
         return error;
     }
     return std::nullopt;
-}
-
-bool GrammarLogitsProcessor::isSpecVerifyEligible() const {
-    return matcher_ != nullptr;
 }
 
 ErrorResult<int> GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {

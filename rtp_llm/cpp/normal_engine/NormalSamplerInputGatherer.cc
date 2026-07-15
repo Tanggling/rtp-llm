@@ -198,24 +198,11 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
     }
 }
 
-void NormalSamplerInputGatherer::insertProcessorState(LogitsProcessorStatesPtr&                   state_ptr,
-                                                      const std::shared_ptr<BaseLogitsProcessor>& processor,
-                                                      GenerateStreamPtr&                          stream,
-                                                      size_t                                      idx,
-                                                      int                                         score_len) {
-    switch (processor->scoreBatchRole()) {
-        case ScoreBatchRole::kScoreBatchProcess:
-            for (int i = 0; i < score_len; ++i) {
-                state_ptr->insert(processor, idx + i, idx + i + 1);
-            }
-            break;
-        case ScoreBatchRole::kSpecVerify:
-            break;
-        case ScoreBatchRole::kNormalDecodeOnly:
-            stream->reportError(ErrorCode::INVALID_PARAMS,
-                                "normal-decode-only logits processor cannot run in score_batch decoding");
-            break;
-    }
+void NormalSamplerInputGatherer::insertScoreBatchProcessor(LogitsProcessorStatesPtr&            state_ptr,
+                                                           const ScoreBatchLogitsProcessorPtr& processor,
+                                                           size_t                               idx,
+                                                           int                                  score_len) {
+    state_ptr->insert(processor, idx, idx + static_cast<size_t>(score_len));
 }
 
 void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
@@ -226,15 +213,15 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
     for (auto& stream : all_streams) {
         if (score_batch) {
             const int score_len = static_cast<int>(stream->scoreLen());
-            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            for (const auto& processor : stream->logitsProcessors().scoreBatchProcessors()) {
                 if (processor) {
-                    NormalSamplerInputGatherer::insertProcessorState(state_ptr, processor, stream, idx, score_len);
+                    NormalSamplerInputGatherer::insertScoreBatchProcessor(state_ptr, processor, idx, score_len);
                 }
             }
             idx += static_cast<size_t>(score_len);
         } else {
             const size_t batch_size = stream->currentBatchSize();
-            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            for (const auto& processor : stream->logitsProcessors().normalProcessors()) {
                 if (processor) {
                     state_ptr->insert(processor, idx, idx + batch_size);
                 }

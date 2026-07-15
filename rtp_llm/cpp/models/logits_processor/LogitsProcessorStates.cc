@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 
+#include <type_traits>
+
 using namespace std;
 
 namespace rtp_llm {
@@ -20,9 +22,18 @@ void LogitsProcessorStates::setIntervalError(std::vector<std::optional<ErrorInfo
 
 std::vector<std::optional<ErrorInfo>> LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
     std::vector<std::optional<ErrorInfo>> processor_errors(inputs.batch_size);
-    for (size_t i = 0; i < logits_processors_.size(); i++) {
-        const auto& interval = intervals_[i];
-        auto        error    = logits_processors_[i]->process(inputs, interval.first, interval.second);
+    for (const auto& invocation : invocations_) {
+        const auto& interval = invocation.interval;
+        auto error = std::visit(
+            [&](const auto& processor) -> std::optional<ErrorInfo> {
+                using ProcessorPtr = std::decay_t<decltype(processor)>;
+                if constexpr (std::is_same_v<ProcessorPtr, BaseLogitsProcessorPtr>) {
+                    return processor->process(inputs, interval.first, interval.second);
+                } else {
+                    return processor->processScoreBatch(inputs, interval.first, interval.second);
+                }
+            },
+            invocation.processor);
         if (error.has_value()) {
             setIntervalError(processor_errors, interval, error.value());
         }
@@ -31,8 +42,11 @@ std::vector<std::optional<ErrorInfo>> LogitsProcessorStates::batchProcess(const 
 }
 
 void LogitsProcessorStates::insert(const BaseLogitsProcessorPtr& ptr, size_t start, size_t finish) {
-    logits_processors_.push_back(ptr);
-    intervals_.push_back(std::make_pair(start, finish));
+    invocations_.push_back({ptr, std::make_pair(start, finish)});
+}
+
+void LogitsProcessorStates::insert(const ScoreBatchLogitsProcessorPtr& ptr, size_t start, size_t finish) {
+    invocations_.push_back({ptr, std::make_pair(start, finish)});
 }
 
 }  // namespace rtp_llm
