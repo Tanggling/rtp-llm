@@ -1696,4 +1696,3 @@ message LogSettingsResponse
   //@@
   map<string, SettingValue> settings = 1;
 }
-
