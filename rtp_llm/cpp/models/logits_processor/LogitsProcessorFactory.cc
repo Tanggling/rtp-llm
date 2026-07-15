@@ -22,31 +22,43 @@ namespace rtp_llm {
 
 namespace {
 
-GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
-    // Fixed priority json_schema > regex > ebnf > structural_tag silently drops the
-    // others when a caller sets multiple. Warn so we can audit the call site.
-    const bool multi_grammar = (config.json_schema.has_value() + config.regex.has_value() + config.ebnf.has_value()
-                                + config.structural_tag.has_value())
-                               > 1;
-    if (multi_grammar) {
-        RTP_LLM_LOG_WARNING("GenerateConfig sets multiple grammar fields simultaneously; "
-                            "applying priority json_schema>regex>ebnf>structural_tag");
-    }
+ErrorResult<GrammarKeyCpp> keyFromGenerateConfig(const GenerateConfig& config) {
+    std::vector<std::string> constraint_names;
     if (config.json_schema.has_value()) {
-        return {"json", config.json_schema.value()};
+        constraint_names.emplace_back("json_schema");
     }
     if (config.regex.has_value()) {
-        return {"regex", config.regex.value()};
+        constraint_names.emplace_back("regex");
     }
     if (config.ebnf.has_value()) {
-        return {"ebnf", config.ebnf.value()};
+        constraint_names.emplace_back("ebnf");
     }
     if (config.structural_tag.has_value()) {
-        return {"structural_tag", config.structural_tag.value()};
+        constraint_names.emplace_back("structural_tag");
+    }
+    if (constraint_names.size() > 1) {
+        std::string received = constraint_names.front();
+        for (size_t i = 1; i < constraint_names.size(); ++i) {
+            received += ", " + constraint_names[i];
+        }
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "only one grammar constraint may be set per request; received: " + received);
+    }
+    if (config.json_schema.has_value()) {
+        return GrammarKeyCpp{"json", config.json_schema.value()};
+    }
+    if (config.regex.has_value()) {
+        return GrammarKeyCpp{"regex", config.regex.value()};
+    }
+    if (config.ebnf.has_value()) {
+        return GrammarKeyCpp{"ebnf", config.ebnf.value()};
+    }
+    if (config.structural_tag.has_value()) {
+        return GrammarKeyCpp{"structural_tag", config.structural_tag.value()};
     }
     // response_format envelope is projected to typed fields above in Python ResponseFormatBuilder.
     // The C++ engine only consumes typed fields.
-    return {};
+    return GrammarKeyCpp{};
 }
 
 }  // namespace
@@ -70,8 +82,13 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                                                int64_t                        eos_token_id) {
     LogitsProcessors result;
 
-    auto&         config      = *generate_input->generate_config;
-    GrammarKeyCpp grammar_key = keyFromGenerateConfig(config);
+    auto& config = *generate_input->generate_config;
+
+    auto grammar_key_result = keyFromGenerateConfig(config);
+    if (!grammar_key_result.ok()) {
+        return grammar_key_result.status();
+    }
+    GrammarKeyCpp grammar_key = std::move(grammar_key_result.value());
 
     if (!grammar_key.empty()) {
         if (config.hasNumBeams() || config.num_return_sequences > 1) {

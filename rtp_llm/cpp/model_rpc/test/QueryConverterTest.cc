@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include <array>
 #include <memory>
 #include <optional>
 
@@ -8,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
@@ -209,6 +211,44 @@ TEST_F(QueryConverterTest, GrammarTypedFieldsAreAccepted) {
     auto cfg = QueryConverter::transQuery(&input)->generate_config;
     ASSERT_TRUE(cfg->json_schema.has_value());
     EXPECT_EQ(cfg->json_schema.value(), R"({"type":"object"})");
+}
+
+TEST_F(QueryConverterTest, MultipleGrammarConstraintsAreRejectedByFactory) {
+    using SetGrammarField = void (*)(GenerateConfigPB*);
+    struct GrammarFieldCase {
+        const char*     name;
+        SetGrammarField set;
+    };
+    const std::array<GrammarFieldCase, 4> fields{{
+        {"json_schema", [](GenerateConfigPB* config) {
+             config->mutable_json_schema()->set_value(R"({"type":"object"})");
+         }},
+        {"regex", [](GenerateConfigPB* config) { config->mutable_regex()->set_value("[a-z]+"); }},
+        {"ebnf", [](GenerateConfigPB* config) { config->mutable_ebnf()->set_value("root ::= \"a\""); }},
+        {"structural_tag", [](GenerateConfigPB* config) {
+             config->mutable_structural_tag()->set_value(R"({"type":"structural_tag"})");
+         }},
+    }};
+
+    for (size_t first = 0; first < fields.size(); ++first) {
+        for (size_t second = first + 1; second < fields.size(); ++second) {
+            SCOPED_TRACE(std::string(fields[first].name) + "+" + fields[second].name);
+            GenerateInputPB input;
+            input.add_token_ids(0);
+            auto* config = input.mutable_generate_config();
+            fields[first].set(config);
+            fields[second].set(config);
+
+            auto generate_input = QueryConverter::transQuery(&input);
+            auto result = LogitsProcessorFactory::createLogitsProcessors(
+                std::move(generate_input), /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+            ASSERT_FALSE(result.ok());
+            EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_NE(result.status().ToString().find(fields[first].name), std::string::npos);
+            EXPECT_NE(result.status().ToString().find(fields[second].name), std::string::npos);
+        }
+    }
 }
 
 }  // namespace rtp_llm
