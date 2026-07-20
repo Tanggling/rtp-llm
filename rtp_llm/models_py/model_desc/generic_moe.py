@@ -15,7 +15,10 @@ _MOE_TOPK_EXPORT_DIR = os.environ.get("MOE_TOPK_EXPORT_DIR", "")
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_fmha_params,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -639,7 +642,6 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
-
         # Phase timing covers prefill only: decode may run under CUDA graph
         # replay, where host-side event records are not captured.
         timer = self._phase_timer
@@ -652,11 +654,13 @@ class GenericMoeModel(GptModelBase):
         recorded = False
         try:
             for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-                select_block_map_for_layer(inputs.attention_inputs, i)
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
                 output = decoder_layer(
                     hidden_states,
                     residual,
-                    fmha_impl,
+                    layer_fmha_impl,
                     kv_cache=(
                         self.kv_cache.get_layer_cache(i) if self.kv_cache else None
                     ),
@@ -684,7 +688,7 @@ class GenericMoeModel(GptModelBase):
                 start_ev.elapsed_time(end_ev),
                 input_ids.numel(),
             )
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
 
 
 __all__ = [
