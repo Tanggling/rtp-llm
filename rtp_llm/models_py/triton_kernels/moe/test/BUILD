@@ -32,3 +32,14 @@ py_test(
     visibility = ["//visibility:public"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "record_expert_stats_test",
+    srcs = ["record_expert_stats_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ] + [":triton", ":torch"],
+    # CPU-only: runs the kernel through the triton interpreter
+    env = {"TRITON_INTERPRET": "1"},
+    visibility = ["//visibility:public"],
+)

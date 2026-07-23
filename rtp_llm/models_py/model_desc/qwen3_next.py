@@ -286,7 +286,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 g,
                 beta,
                 prefix_lengths=(
-                    attn_inputs.prefix_lengths_device if ssm_states is not None else None
+                    attn_inputs.prefix_lengths_device
+                    if ssm_states is not None
+                    else None
                 ),
                 block_map=(
                     attn_inputs.kv_cache_kernel_block_id_device
@@ -962,6 +964,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
         elif config.moe_style == 0:
             self.mlp = DenseMLP(
@@ -1053,6 +1056,14 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+
+    def initialize(self, init_resource) -> bool:
+        result = super().initialize(init_resource)
+        if self.expert_stats is not None:
+            for layer in self.layers:
+                if isinstance(layer.mlp, GenericMoeLayer):
+                    layer.mlp.expert_stats = self.expert_stats
+        return result
 
     def _build_cp_linear_attn_metadata(
         self,

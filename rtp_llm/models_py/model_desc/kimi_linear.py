@@ -725,6 +725,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         # RMSResNorm: fused residual add + layernorm
@@ -819,6 +820,14 @@ class KimiLinearModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+
+    def initialize(self, init_resource) -> bool:
+        result = super().initialize(init_resource)
+        if self.expert_stats is not None:
+            for layer in self.layers:
+                if isinstance(layer.mlp, GenericMoeLayer):
+                    layer.mlp.expert_stats = self.expert_stats
+        return result
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids

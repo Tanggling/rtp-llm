@@ -26,6 +26,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import record_expert_stats
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -43,10 +44,14 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
+        self.layer_idx = layer_idx
+        # ExpertStatsBuffer, assigned by the model in initialize() when EPLB is enabled
+        self.expert_stats = None
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -161,6 +166,14 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        if self.expert_stats is not None:
+            record_expert_stats(
+                topk_ids,
+                self.expert_stats.log_stats_buf,
+                self.expert_stats.gpu_loads_buf,
+                self.layer_idx,
+            )
+
         is_ep_mode = self.ep_size > 1
         # EP mode: routed expert output is already complete (EP combine handles it).
         # Shared expert output is TP-partial and needs separate allreduce.
@@ -273,6 +286,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -357,6 +371,14 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+
+    def initialize(self, init_resource) -> bool:
+        result = super().initialize(init_resource)
+        if self.expert_stats is not None:
+            for layer in self.layers:
+                if isinstance(layer.mlp, GenericMoeLayer):
+                    layer.mlp.expert_stats = self.expert_stats
+        return result
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids

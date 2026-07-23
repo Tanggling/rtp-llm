@@ -61,9 +61,21 @@ void registerPyOpDefs(pybind11::module& m) {
              &KVCache::getLayerCaches,
              "Return all LayerKVCache objects for every group the layer owns");
 
+    pybind11::class_<rtp_llm::ExpertStatsBuffer>(m, "ExpertStatsBuffer")
+        .def(pybind11::init<>())
+        .def_readwrite("log_stats_buf",
+                       &rtp_llm::ExpertStatsBuffer::log_stats_buf,
+                       "Per-layer logical expert activation counts, [layer_num, log_exp_num], INT32, device tensor")
+        .def_readwrite("gpu_loads_buf",
+                       &rtp_llm::ExpertStatsBuffer::gpu_loads_buf,
+                       "Per-layer per-EP-rank token loads, [layer_num, ep_size], INT32, device tensor");
+
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
-        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers");
+        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
+        .def_readonly("expert_stats",
+                      &PyModelInitResources::expert_stats,
+                      "Expert activation stats buffers shared with the EPLB balancer");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
@@ -209,7 +221,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
-
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

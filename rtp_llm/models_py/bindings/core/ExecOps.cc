@@ -448,6 +448,11 @@ py::function
     g_allgather_fn;  // (recv_buffers: list[Tensor], mode: int, send_buffers: list[Tensor], inplace: bool) -> None
 }  // anonymous namespace
 
+bool isCommOpsRegistered() {
+    std::lock_guard<std::mutex> lock(g_comm_mutex);
+    return static_cast<bool>(g_broadcast_fn);
+}
+
 void execBroadcast(const BroadcastParams& params) {
     py::function fn;
     {

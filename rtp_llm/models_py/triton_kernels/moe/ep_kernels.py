@@ -32,7 +32,9 @@ def _fwd_kernel_ep_scatter_1(
     tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
     expert_mask = offset_cumsum == cur_expert
     cur_expert_start = tl.sum(tl.where(expert_mask, cumsum, tl.zeros_like(cumsum)))
-    cur_expert_token_num = tl.sum(tl.where(expert_mask, tokens_per_expert, tl.zeros_like(tokens_per_expert)))
+    cur_expert_token_num = tl.sum(
+        tl.where(expert_mask, tokens_per_expert, tl.zeros_like(tokens_per_expert))
+    )
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E)
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
@@ -255,7 +257,9 @@ def _fwd_kernel_ep_scatter_2_v2(
                 )
                 token_idx = dest_token_index % alignment
                 output_tensor_scale_ptr = (
-                    output_tensor_scale + expert_id * output_tensor_scale_stride0 + token_idx * output_tensor_scale_stride1
+                    output_tensor_scale
+                    + expert_id * output_tensor_scale_stride0
+                    + token_idx * output_tensor_scale_stride1
                 )
                 tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
                 tl.store(
@@ -373,7 +377,9 @@ def _fwd_kernel_ep_gather(
                 source_token_index = source_token_index_int32.to(tl.int64)
                 if source_token_index >= 0 and source_token_index < total_input_tokens:
                     acc_weight = tl.load(
-                        recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
+                        recv_topk_weight
+                        + cur_token * recv_topk_weight_stride0
+                        + topk_index
                     )
                     tmp = tl.load(
                         input_tensor
@@ -496,7 +502,11 @@ def tma_align_input_scale(input_scale: torch.Tensor):
         input_view = input_scale
 
     padded_m = get_tma_aligned_size(m, input_scale.element_size())
-    output = torch.empty((g, k_div_block_size, padded_m), dtype=input_scale.dtype, device=input_scale.device)
+    output = torch.empty(
+        (g, k_div_block_size, padded_m),
+        dtype=input_scale.dtype,
+        device=input_scale.device,
+    )
     grid_m = min(m, 8192)
     BLOCK_SIZE_K = triton.next_power_of_2(k_div_block_size)
     _tma_align_input_scale_kernel[(grid_m, g)](
@@ -855,4 +865,77 @@ def get_cutlass_moe_mm_without_permute_info(
         num_experts,
         swap_ab=problem_1_swap_ab,
         BLOCK_E=BLOCK_E,
+    )
+
+
+@triton.jit
+def _record_expert_stats_kernel(
+    topk_ids_ptr,
+    log_stats_ptr,
+    gpu_loads_ptr,
+    total_ids,
+    layer_idx,
+    log_exp_num,
+    ep_size,
+    experts_per_rank,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_ids
+
+    expert_ids = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int64)
+    # masked-out lanes and padded/invalid expert ids must not touch the buffers
+    valid = mask & (expert_ids >= 0) & (expert_ids < log_exp_num)
+
+    tl.atomic_add(
+        log_stats_ptr + layer_idx * log_exp_num + expert_ids,
+        1,
+        mask=valid,
+    )
+
+    ep_ranks = tl.minimum(expert_ids // experts_per_rank, ep_size - 1)
+    tl.atomic_add(
+        gpu_loads_ptr + layer_idx * ep_size + ep_ranks,
+        1,
+        mask=valid,
+    )
+
+
+def record_expert_stats(
+    topk_ids: torch.Tensor,
+    log_stats_buf: torch.Tensor,
+    gpu_loads_buf: torch.Tensor,
+    layer_idx: int,
+) -> None:
+    """Accumulate per-expert activation counts and per-EP-rank loads for EPLB.
+
+    Device-side atomics only (no host sync), so it is safe under CUDA Graph capture.
+
+    Args:
+        topk_ids: [num_tokens, top_k] routed expert ids (any integer dtype).
+        log_stats_buf: [layer_num, log_exp_num] INT32 buffer, incremented per expert hit.
+        gpu_loads_buf: [layer_num, ep_size] INT32 buffer, incremented per token-expert
+            pair on the EP rank hosting the expert.
+    """
+    total_ids = topk_ids.numel()
+    if total_ids == 0:
+        return
+
+    log_exp_num = log_stats_buf.shape[1]
+    ep_size = gpu_loads_buf.shape[1]
+    experts_per_rank = ceil_div(log_exp_num, ep_size)
+
+    BLOCK_SIZE = min(1024, triton.next_power_of_2(total_ids))
+    grid = (ceil_div(total_ids, BLOCK_SIZE),)
+    _record_expert_stats_kernel[grid](
+        topk_ids.contiguous(),
+        log_stats_buf,
+        gpu_loads_buf,
+        total_ids,
+        layer_idx,
+        log_exp_num,
+        ep_size,
+        experts_per_rank,
+        BLOCK_SIZE=BLOCK_SIZE,
     )

@@ -10,6 +10,7 @@ from . import rtp_llm_ops
 __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
+    "ExpertStatsBuffer",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
@@ -286,6 +287,31 @@ class PyModelInitResources:
         """
         Layered kv cache for all layers
         """
+
+    @property
+    def expert_stats(self) -> ExpertStatsBuffer | None:
+        """
+        Expert activation stats buffers shared with the EPLB balancer
+        """
+
+class ExpertStatsBuffer:
+    def __init__(self) -> None: ...
+    @property
+    def log_stats_buf(self) -> torch.Tensor:
+        """
+        Per-layer logical expert activation counts, [layer_num, log_exp_num], INT32, device tensor
+        """
+
+    @log_stats_buf.setter
+    def log_stats_buf(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def gpu_loads_buf(self) -> torch.Tensor:
+        """
+        Per-layer per-EP-rank token loads, [layer_num, ep_size], INT32, device tensor
+        """
+
+    @gpu_loads_buf.setter
+    def gpu_loads_buf(self, arg0: torch.Tensor) -> None: ...
 
 class PyModelInputs:
     @typing.overload

@@ -95,6 +95,11 @@ void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
 void            execSyncCommunication(ParallelMode mode, bool timeout = true);
 
+// Whether Python communication callbacks have been registered via register_comm_ops.
+// False in single-GPU deployments where no ProcessGroup exists; callers must skip
+// broadcast/allreduce/allgather in that case.
+bool isCommOpsRegistered();
+
 // ===================================================================
 // MOE / EPLB
 // ===================================================================

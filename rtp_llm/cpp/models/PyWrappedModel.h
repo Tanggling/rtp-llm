@@ -169,14 +169,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
-        kv_cache.layer_attn_types   = layout.layer_attn_types;
-        kv_cache.layer_to_group_ids = layout.layer_to_group_ids;
-        kv_cache.group_types        = layout.group_types;
-        kv_cache.group_tags         = layout.group_tags;
+        kv_cache.layer_attn_types             = layout.layer_attn_types;
+        kv_cache.layer_to_group_ids           = layout.layer_to_group_ids;
+        kv_cache.group_types                  = layout.group_types;
+        kv_cache.group_tags                   = layout.group_tags;
         kv_cache.layer_tag_to_group_id        = layout.layer_tag_to_group_id;
         kv_cache.kv_cache_base_by_layer_group = layout.layers_to_kv_buffer_ptrs_by_group;
         kv_cache.kv_scale_base_by_layer_group = layout.layers_to_scale_buffer_ptrs_by_group;
-        init_resources.kv_cache     = kv_cache;
+        init_resources.kv_cache               = kv_cache;
+    }
+
+    if (params.description.ffn_conf.moe_configs.has_value()) {
+        init_resources.expert_stats = overall_expert_stats_.stats_buf;
     }
 
     py::object py_init_result;

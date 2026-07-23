@@ -79,6 +79,12 @@ void LoadFlags::setReady(bool ready) {
 }
 
 bool LoadFlags::isReady() {
+    if (!isCommOpsRegistered()) {
+        // single-GPU: no cross-rank sync available, consume the local flag directly
+        flag_host.copy_(flag_gpu);
+        flag_gpu.fill_(-1);
+        return flag_host.item<int>() == 0;
+    }
     // sync all ranks load_flag_tensor_
     flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
 
@@ -133,8 +139,10 @@ EPLBConfig EplbController::getAndSyncData() {
     // copy to device
     eplb_control_data_buf_device.copy_(eplb_control_data_buf_host, /*non_blocking=*/true);
 
-    // broadcast to all ranks
-    execBroadcast({{eplb_control_data_buf_device}, 0, ParallelMode::DP_AND_TP});
+    // broadcast to all ranks (skip when comm ops unavailable, e.g. single GPU)
+    if (isCommOpsRegistered()) {
+        execBroadcast({{eplb_control_data_buf_device}, 0, ParallelMode::DP_AND_TP});
+    }
 
     // copy to host
     eplb_control_data_buf_host.copy_(eplb_control_data_buf_device);
@@ -187,17 +195,30 @@ ExpertBalancer::~ExpertBalancer() {}
 void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector) {
     syncController();
 
-    if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
+    OverallExpertStats& stats = model.overall_expert_stats_;
+
+    // stats buffers are only allocated for MoE models (PyWrappedModel)
+    if (!stats.stats_buf.log_stats_buf.defined()) {
         return;
     }
 
-    OverallExpertStats& stats = model.overall_expert_stats_;
+    if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
+        // drop this step's increments so stale counts never leak into a later mode switch
+        stats.stats_buf.log_stats_buf.zero_();
+        stats.stats_buf.gpu_loads_buf.zero_();
+        return;
+    }
 
     // report stats
     reportStats(stats);
 
     // eplb plan
     excuteEplbPlan(stats, model);
+
+    // L0 per-step zeroing: stats_buf holds single-step increments written by the
+    // triton kernel; clear on the consumer side (a step may run multiple forwards)
+    stats.stats_buf.log_stats_buf.zero_();
+    stats.stats_buf.gpu_loads_buf.zero_();
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
@@ -248,11 +269,14 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
 
 void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model) {
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::EPLB, EplbMode::ALL)) {
+        // accumulate in every state so increments produced while a plan is being
+        // prepared/loaded are not lost
+        updateStats(stats);
+
         EplbPlanStatus status = getPlanStatus();
         switch (status) {
             case EplbPlanStatus::INIT:
                 update_cnt_++;
-                updateStats(stats);
                 if (update_cnt_ >= eplb_control_data_.eplb_update_time) {
                     setPlanStatus(EplbPlanStatus::PREPARING);
                 }
@@ -311,13 +335,20 @@ void ExpertBalancer::copyToTensor(const torch::Tensor& src, torch::Tensor& dst) 
 }
 
 void ExpertBalancer::createPlan() {
-    // pre run
-    execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
-    execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    // pre run: aggregate per-rank stats (skip when comm ops unavailable, e.g. single GPU)
+    if (isCommOpsRegistered()) {
+        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    }
 
     // copy stats gpu tensor to host tensor [implicit sync]
     stats_.log_stats.copy_(stats_.log_stats_gpu);
     stats_.gpu_loads.copy_(stats_.gpu_loads_gpu);
+
+    // L1 per-plan-period zeroing: restart accumulation so the next plan sees
+    // interval increments instead of the full history
+    stats_.log_stats_gpu.zero_();
+    stats_.gpu_loads_gpu.zero_();
 
     if (ep_rank_ == 0) {
         eplb_python_wrapper_.createBalancePlan(stats_.log_stats, stats_.gpu_loads, eplb_plan_tensors_);
@@ -330,12 +361,14 @@ void ExpertBalancer::createPlan() {
         copyFromTensor(eplb_plan_tensors_.phy2log, eplb_plan_buffers_.phy2log);
     }
 
-    execBroadcast({{eplb_plan_buffers_.layer_id_buf,
-                    eplb_plan_buffers_.logic_expert_cnt,
-                    eplb_plan_buffers_.log2phy,
-                    eplb_plan_buffers_.phy2log},
-                   0,
-                   ParallelMode::DP_AND_TP});
+    if (isCommOpsRegistered()) {
+        execBroadcast({{eplb_plan_buffers_.layer_id_buf,
+                        eplb_plan_buffers_.logic_expert_cnt,
+                        eplb_plan_buffers_.log2phy,
+                        eplb_plan_buffers_.phy2log},
+                       0,
+                       ParallelMode::DP_AND_TP});
+    }
 
     // copy plan gpu tensor to host tensor [implicit sync]
     copyToTensor(eplb_plan_buffers_.layer_id_buf, eplb_plan_tensors_.layer_id_buf);

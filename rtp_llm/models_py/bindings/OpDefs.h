@@ -11,6 +11,7 @@
 #include <vector>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -244,7 +245,8 @@ struct KVCache {
 };
 
 struct PyModelInitResources {
-    std::optional<KVCache> kv_cache;
+    std::optional<KVCache>                    kv_cache;
+    std::optional<rtp_llm::ExpertStatsBuffer> expert_stats;
 };
 
 struct PyCacheStoreInputs {

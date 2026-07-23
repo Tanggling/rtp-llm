@@ -9,6 +9,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
+    ExpertStatsBuffer,
     KVCache,
     PyModelInitResources,
     PyModelInputs,
@@ -46,6 +47,7 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
+        self.expert_stats: Optional[ExpertStatsBuffer] = None
         self.device_type: DeviceType = get_device_type()
 
         ## (batch_size -> fmha_params)
@@ -53,6 +55,7 @@ class GptModelBase(nn.Module):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
+        self.expert_stats = getattr(init_resource, "expert_stats", None)
         if self.kv_cache is not None:
             num_layers = len(self.kv_cache.kv_cache_base_by_layer)
             layer0_shape = (
