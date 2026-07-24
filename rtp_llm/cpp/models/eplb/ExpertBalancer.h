@@ -110,6 +110,7 @@ public:
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
+    void exportStats(OverallExpertStats& stats);
     void excuteEplbPlan(OverallExpertStats& stats, ModelBase& model);
 
     void           setPlanStatus(EplbPlanStatus status);
@@ -158,6 +159,14 @@ private:
     mutable std::mutex eplb_plan_status_mutex_;
 
     bool test_mode_ = false;
+
+    // STATS-mode export: periodically dump accumulated activation counts to JSON
+    int64_t       stats_export_step_ = 0;  // 0 = disabled
+    std::string   stats_export_dir_;
+    int64_t       stats_export_cnt_ = 0;
+    int64_t       total_step_cnt_   = 0;
+    torch::Tensor export_log_stats_;  // host [layer, log_exp_num], INT64
+    torch::Tensor export_gpu_loads_;  // host [layer, ep_size], INT64
 };
 
 }  // namespace rtp_llm

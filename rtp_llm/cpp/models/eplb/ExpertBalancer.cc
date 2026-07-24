@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include <filesystem>
+#include <fstream>
 #include <thread>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -187,6 +190,17 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
 
     balance_layer_per_step_ = eplb_config.eplb_balance_layer_per_step;
 
+    stats_export_step_ = autil::EnvUtil::getEnv("EPLB_STATS_EXPORT_STEP", 100);
+    stats_export_dir_  = autil::EnvUtil::getEnv("EPLB_STATS_EXPORT_DIR", std::string("eplb_stats"));
+    if (stats_export_step_ > 0) {
+        export_log_stats_ = torch::zeros({(int64_t)num_layers, (int64_t)log_exp_num}, torch::kInt64);
+        export_gpu_loads_ = torch::zeros({(int64_t)num_layers, (int64_t)ep_size_}, torch::kInt64);
+        printf("[EPLB] stats export enabled: every %ld steps -> %s (rank %zu)\n",
+               (long)stats_export_step_,
+               stats_export_dir_.c_str(),
+               ep_rank_);
+    }
+
     resetPlan(true);
 }
 
@@ -211,6 +225,9 @@ void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollecto
 
     // report stats
     reportStats(stats);
+
+    // periodic activation dump (STATS / ALL mode)
+    exportStats(stats);
 
     // eplb plan
     excuteEplbPlan(stats, model);
@@ -254,6 +271,91 @@ void ExpertBalancer::reportStats(OverallExpertStats& stats) {
 
         metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
     }
+}
+
+void ExpertBalancer::exportStats(OverallExpertStats& stats) {
+    if (stats_export_step_ <= 0
+        || !eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
+        return;
+    }
+
+    // accumulate this step's increments (stats_buf is zeroed per step by stepForward)
+    export_log_stats_.add_(stats.stats_buf.log_stats_buf.cpu());
+    export_gpu_loads_.add_(stats.stats_buf.gpu_loads_buf.cpu());
+    total_step_cnt_++;
+    stats_export_cnt_++;
+
+    if (stats_export_cnt_ < stats_export_step_) {
+        return;
+    }
+    stats_export_cnt_ = 0;
+
+    int64_t        timestamp_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    const int64_t  layer_num    = export_log_stats_.size(0);
+    const int64_t  log_exp_num  = export_log_stats_.size(1);
+    const int64_t  ep_size      = export_gpu_loads_.size(1);
+    const int64_t* log_stats    = export_log_stats_.data_ptr<int64_t>();
+    const int64_t* gpu_loads    = export_gpu_loads_.data_ptr<int64_t>();
+
+    std::error_code ec;
+    std::filesystem::create_directories(stats_export_dir_, ec);
+    if (ec) {
+        RTP_LLM_LOG_WARNING(
+            "EPLB stats export: failed to create dir %s: %s", stats_export_dir_.c_str(), ec.message().c_str());
+        export_log_stats_.zero_();
+        export_gpu_loads_.zero_();
+        return;
+    }
+
+    std::string file_path = stats_export_dir_ + "/eplb_stats_rank" + std::to_string(ep_rank_) + "_step"
+                            + std::to_string(total_step_cnt_) + "_" + std::to_string(timestamp_ms) + ".json";
+    std::ofstream out(file_path);
+    if (!out.is_open()) {
+        RTP_LLM_LOG_WARNING("EPLB stats export: failed to open %s", file_path.c_str());
+        export_log_stats_.zero_();
+        export_gpu_loads_.zero_();
+        return;
+    }
+
+    auto write_matrix = [&out](const int64_t* data, int64_t rows, int64_t cols) {
+        out << "[";
+        for (int64_t i = 0; i < rows; ++i) {
+            out << (i ? ",[" : "[");
+            for (int64_t j = 0; j < cols; ++j) {
+                out << (j ? "," : "") << data[i * cols + j];
+            }
+            out << "]";
+        }
+        out << "]";
+    };
+
+    out << "{";
+    out << "\"timestamp_ms\":" << timestamp_ms << ",";
+    out << "\"total_step\":" << total_step_cnt_ << ",";
+    out << "\"interval_steps\":" << stats_export_step_ << ",";
+    out << "\"ep_rank\":" << ep_rank_ << ",";
+    out << "\"ep_size\":" << ep_size << ",";
+    out << "\"layer_num\":" << layer_num << ",";
+    out << "\"log_exp_num\":" << log_exp_num << ",";
+    out << "\"log_stats\":";
+    write_matrix(log_stats, layer_num, log_exp_num);
+    out << ",\"gpu_loads\":";
+    write_matrix(gpu_loads, layer_num, ep_size);
+    out << "}\n";
+    out.close();
+
+    // brief per-dump summary on stdout (C++ file logs do not reach stdout)
+    int64_t total_activations = export_log_stats_.sum().item<int64_t>();
+    printf("[EPLB] rank %zu step %ld: dumped expert stats (%ld activations in last %ld steps) -> %s\n",
+           ep_rank_,
+           (long)total_step_cnt_,
+           (long)total_activations,
+           (long)stats_export_step_,
+           file_path.c_str());
+    fflush(stdout);
+
+    export_log_stats_.zero_();
+    export_gpu_loads_.zero_();
 }
 
 void ExpertBalancer::setPlanStatus(EplbPlanStatus status) {
