@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -352,6 +353,27 @@ void ExpertBalancer::exportStats(OverallExpertStats& stats) {
            (long)total_activations,
            (long)stats_export_step_,
            file_path.c_str());
+
+    // top-K hottest logical experts, aggregated over all layers
+    constexpr int64_t kTopK      = 8;
+    const int64_t     k          = std::min(kTopK, log_exp_num);
+    auto              per_expert = export_log_stats_.sum(0);  // [log_exp_num], INT64
+    auto [topk_vals, topk_idxs]  = per_expert.topk(k);
+    const int64_t* vals          = topk_vals.data_ptr<int64_t>();
+    const int64_t* idxs          = topk_idxs.data_ptr<int64_t>();
+    std::string    topk_str;
+    for (int64_t i = 0; i < k; ++i) {
+        if (i) {
+            topk_str += ", ";
+        }
+        topk_str += std::to_string(idxs[i]) + ":" + std::to_string(vals[i]);
+    }
+    printf("[EPLB] rank %zu step %ld: top%ld experts (id:count, summed over %ld layers): %s\n",
+           ep_rank_,
+           (long)total_step_cnt_,
+           (long)k,
+           (long)layer_num,
+           topk_str.c_str());
     fflush(stdout);
 
     export_log_stats_.zero_();
