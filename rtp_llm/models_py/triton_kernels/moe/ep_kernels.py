@@ -902,6 +902,34 @@ def _record_expert_stats_kernel(
     )
 
 
+def _record_expert_stats_torch(
+    topk_ids: torch.Tensor,
+    log_stats_buf: torch.Tensor,
+    gpu_loads_buf: torch.Tensor,
+    layer_idx: int,
+) -> None:
+    """Pure-torch fallback for platforms without a working triton backend (e.g. PPU)."""
+    log_exp_num = log_stats_buf.shape[1]
+    ep_size = gpu_loads_buf.shape[1]
+    experts_per_rank = ceil_div(log_exp_num, ep_size)
+
+    ids = topk_ids.reshape(-1).long()
+    ids = ids[(ids >= 0) & (ids < log_exp_num)]
+    if ids.numel() == 0:
+        return
+
+    ones = torch.ones_like(ids, dtype=log_stats_buf.dtype)
+    log_stats_buf[layer_idx].scatter_add_(0, ids, ones)
+
+    ranks = torch.clamp(ids // experts_per_rank, max=ep_size - 1)
+    gpu_loads_buf[layer_idx].scatter_add_(
+        0, ranks, torch.ones_like(ranks, dtype=gpu_loads_buf.dtype)
+    )
+
+
+_record_expert_stats_use_triton = True
+
+
 def record_expert_stats(
     topk_ids: torch.Tensor,
     log_stats_buf: torch.Tensor,
@@ -910,7 +938,9 @@ def record_expert_stats(
 ) -> None:
     """Accumulate per-expert activation counts and per-EP-rank loads for EPLB.
 
-    Device-side atomics only (no host sync), so it is safe under CUDA Graph capture.
+    Device-side ops only (no host sync), so it is safe under CUDA Graph capture.
+    Falls back to a pure-torch implementation when the triton backend cannot
+    compile for the current device (e.g. PPU without ptxas).
 
     Args:
         topk_ids: [num_tokens, top_k] routed expert ids (any integer dtype).
@@ -918,24 +948,38 @@ def record_expert_stats(
         gpu_loads_buf: [layer_num, ep_size] INT32 buffer, incremented per token-expert
             pair on the EP rank hosting the expert.
     """
+    global _record_expert_stats_use_triton
+
     total_ids = topk_ids.numel()
     if total_ids == 0:
         return
 
-    log_exp_num = log_stats_buf.shape[1]
-    ep_size = gpu_loads_buf.shape[1]
-    experts_per_rank = ceil_div(log_exp_num, ep_size)
+    if _record_expert_stats_use_triton:
+        log_exp_num = log_stats_buf.shape[1]
+        ep_size = gpu_loads_buf.shape[1]
+        experts_per_rank = ceil_div(log_exp_num, ep_size)
 
-    BLOCK_SIZE = min(1024, triton.next_power_of_2(total_ids))
-    grid = (ceil_div(total_ids, BLOCK_SIZE),)
-    _record_expert_stats_kernel[grid](
-        topk_ids.contiguous(),
-        log_stats_buf,
-        gpu_loads_buf,
-        total_ids,
-        layer_idx,
-        log_exp_num,
-        ep_size,
-        experts_per_rank,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
+        BLOCK_SIZE = min(1024, triton.next_power_of_2(total_ids))
+        grid = (ceil_div(total_ids, BLOCK_SIZE),)
+        try:
+            _record_expert_stats_kernel[grid](
+                topk_ids.contiguous(),
+                log_stats_buf,
+                gpu_loads_buf,
+                total_ids,
+                layer_idx,
+                log_exp_num,
+                ep_size,
+                experts_per_rank,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+            return
+        except Exception:
+            _record_expert_stats_use_triton = False
+            logger.warning(
+                "triton record_expert_stats kernel unavailable on this device, "
+                "falling back to torch implementation",
+                exc_info=True,
+            )
+
+    _record_expert_stats_torch(topk_ids, log_stats_buf, gpu_loads_buf, layer_idx)

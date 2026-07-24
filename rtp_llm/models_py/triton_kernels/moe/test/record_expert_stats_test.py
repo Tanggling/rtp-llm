@@ -1,11 +1,16 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("TRITON_INTERPRET", "1")
 
 import torch
 
-from rtp_llm.models_py.triton_kernels.moe.ep_kernels import record_expert_stats
+from rtp_llm.models_py.triton_kernels.moe import ep_kernels
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    _record_expert_stats_torch,
+    record_expert_stats,
+)
 
 
 def reference_expert_stats(
@@ -135,6 +140,69 @@ class RecordExpertStatsTest(unittest.TestCase):
             torch.equal(got_gpu, torch.tensor([[1, 1, 1, 1]], dtype=torch.int32))
         )
         self.assertEqual(int(got_log.sum()), 4)
+
+
+class TorchFallbackTest(unittest.TestCase):
+    """Covers the pure-torch implementation used when triton is unavailable
+    (e.g. PPU without a working nvidia backend)."""
+
+    def check_torch(self, topk_ids, layer_num, log_exp_num, ep_size, layer_idx):
+        got_log = torch.zeros(layer_num, log_exp_num, dtype=torch.int32)
+        got_gpu = torch.zeros(layer_num, ep_size, dtype=torch.int32)
+        _record_expert_stats_torch(topk_ids, got_log, got_gpu, layer_idx)
+        want_log, want_gpu = reference_expert_stats(
+            topk_ids, layer_num, log_exp_num, ep_size, layer_idx
+        )
+        self.assertTrue(torch.equal(got_log, want_log))
+        self.assertTrue(torch.equal(got_gpu, want_gpu))
+
+    def test_basic_counting(self):
+        topk_ids = torch.tensor([[0, 1], [1, 3], [3, 3]], dtype=torch.int32)
+        self.check_torch(topk_ids, layer_num=2, log_exp_num=4, ep_size=2, layer_idx=1)
+
+    def test_out_of_range_and_uneven_ranks(self):
+        topk_ids = torch.tensor([[-1, 100, 9, 0]], dtype=torch.int64)
+        self.check_torch(topk_ids, layer_num=1, log_exp_num=10, ep_size=4, layer_idx=0)
+
+    def test_randomized_against_reference(self):
+        gen = torch.Generator().manual_seed(1)
+        for _ in range(20):
+            num_tokens = int(torch.randint(1, 64, (1,), generator=gen))
+            top_k = int(torch.randint(1, 9, (1,), generator=gen))
+            log_exp_num = int(torch.randint(2, 65, (1,), generator=gen))
+            ep_size = int(torch.randint(1, 9, (1,), generator=gen))
+            layer_num = int(torch.randint(1, 5, (1,), generator=gen))
+            layer_idx = int(torch.randint(0, layer_num, (1,), generator=gen))
+            topk_ids = torch.randint(
+                0, log_exp_num, (num_tokens, top_k), generator=gen, dtype=torch.int32
+            )
+            self.check_torch(topk_ids, layer_num, log_exp_num, ep_size, layer_idx)
+
+    def test_wrapper_falls_back_when_triton_launch_fails(self):
+        class BrokenKernel:
+            def __getitem__(self, grid):
+                def launch(*args, **kwargs):
+                    raise RuntimeError("simulated triton backend failure")
+
+                return launch
+
+        topk_ids = torch.tensor([[0, 1, 1]], dtype=torch.int32)
+        log_stats = torch.zeros(1, 4, dtype=torch.int32)
+        gpu_loads = torch.zeros(1, 2, dtype=torch.int32)
+        with mock.patch.object(
+            ep_kernels, "_record_expert_stats_kernel", BrokenKernel()
+        ), mock.patch.object(ep_kernels, "_record_expert_stats_use_triton", True):
+            record_expert_stats(topk_ids, log_stats, gpu_loads, 0)
+            # fallback decision is cached after the first failure
+            self.assertFalse(ep_kernels._record_expert_stats_use_triton)
+            record_expert_stats(topk_ids, log_stats, gpu_loads, 0)
+
+        self.assertTrue(
+            torch.equal(log_stats, torch.tensor([[2, 4, 0, 0]], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(gpu_loads, torch.tensor([[6, 0]], dtype=torch.int32))
+        )
 
 
 class ExpertStatsWiringTest(unittest.TestCase):
