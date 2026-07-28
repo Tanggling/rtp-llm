@@ -870,12 +870,14 @@ def get_cutlass_moe_mm_without_permute_info(
 
 @triton.jit
 def _record_expert_stats_kernel(
-    topk_ids_ptr,
+    logical_topk_ids_ptr,
+    physical_topk_ids_ptr,
     log_stats_ptr,
     gpu_loads_ptr,
     total_ids,
     layer_idx,
     log_exp_num,
+    phy_exp_num,
     ep_size,
     experts_per_rank,
     BLOCK_SIZE: tl.constexpr,
@@ -884,44 +886,55 @@ def _record_expert_stats_kernel(
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < total_ids
 
-    expert_ids = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int64)
+    logical_ids = tl.load(logical_topk_ids_ptr + offsets, mask=mask, other=0).to(
+        tl.int64
+    )
+    physical_ids = tl.load(physical_topk_ids_ptr + offsets, mask=mask, other=0).to(
+        tl.int64
+    )
     # masked-out lanes and padded/invalid expert ids must not touch the buffers
-    valid = mask & (expert_ids >= 0) & (expert_ids < log_exp_num)
+    valid_logical = mask & (logical_ids >= 0) & (logical_ids < log_exp_num)
 
     tl.atomic_add(
-        log_stats_ptr + layer_idx * log_exp_num + expert_ids,
+        log_stats_ptr + layer_idx * log_exp_num + logical_ids,
         1,
-        mask=valid,
+        mask=valid_logical,
     )
 
-    ep_ranks = tl.minimum(expert_ids // experts_per_rank, ep_size - 1)
+    valid_physical = mask & (physical_ids >= 0) & (physical_ids < phy_exp_num)
+    ep_ranks = tl.minimum(physical_ids // experts_per_rank, ep_size - 1)
     tl.atomic_add(
         gpu_loads_ptr + layer_idx * ep_size + ep_ranks,
         1,
-        mask=valid,
+        mask=valid_physical,
     )
 
 
 def _record_expert_stats_torch(
-    topk_ids: torch.Tensor,
+    logical_topk_ids: torch.Tensor,
+    physical_topk_ids: torch.Tensor,
     log_stats_buf: torch.Tensor,
     gpu_loads_buf: torch.Tensor,
     layer_idx: int,
+    phy_exp_num: int,
 ) -> None:
     """Pure-torch fallback for platforms without a working triton backend (e.g. PPU)."""
     log_exp_num = log_stats_buf.shape[1]
     ep_size = gpu_loads_buf.shape[1]
-    experts_per_rank = ceil_div(log_exp_num, ep_size)
+    experts_per_rank = ceil_div(phy_exp_num, ep_size)
 
-    ids = topk_ids.reshape(-1).long()
-    ids = ids[(ids >= 0) & (ids < log_exp_num)]
-    if ids.numel() == 0:
+    logical_ids = logical_topk_ids.reshape(-1).long()
+    logical_ids = logical_ids[(logical_ids >= 0) & (logical_ids < log_exp_num)]
+    if logical_ids.numel() != 0:
+        ones = torch.ones_like(logical_ids, dtype=log_stats_buf.dtype)
+        log_stats_buf[layer_idx].scatter_add_(0, logical_ids, ones)
+
+    physical_ids = physical_topk_ids.reshape(-1).long()
+    physical_ids = physical_ids[(physical_ids >= 0) & (physical_ids < phy_exp_num)]
+    if physical_ids.numel() == 0:
         return
 
-    ones = torch.ones_like(ids, dtype=log_stats_buf.dtype)
-    log_stats_buf[layer_idx].scatter_add_(0, ids, ones)
-
-    ranks = torch.clamp(ids // experts_per_rank, max=ep_size - 1)
+    ranks = torch.clamp(physical_ids // experts_per_rank, max=ep_size - 1)
     gpu_loads_buf[layer_idx].scatter_add_(
         0, ranks, torch.ones_like(ranks, dtype=gpu_loads_buf.dtype)
     )
@@ -931,10 +944,12 @@ _record_expert_stats_use_triton = True
 
 
 def record_expert_stats(
-    topk_ids: torch.Tensor,
+    logical_topk_ids: torch.Tensor,
     log_stats_buf: torch.Tensor,
     gpu_loads_buf: torch.Tensor,
     layer_idx: int,
+    physical_topk_ids: torch.Tensor = None,
+    phy_exp_num: int = None,
 ) -> None:
     """Accumulate per-expert activation counts and per-EP-rank loads for EPLB.
 
@@ -943,32 +958,39 @@ def record_expert_stats(
     compile for the current device (e.g. PPU without ptxas).
 
     Args:
-        topk_ids: [num_tokens, top_k] routed expert ids (any integer dtype).
+        logical_topk_ids: [num_tokens, top_k] logical routed expert ids.
         log_stats_buf: [layer_num, log_exp_num] INT32 buffer, incremented per expert hit.
         gpu_loads_buf: [layer_num, ep_size] INT32 buffer, incremented per token-expert
             pair on the EP rank hosting the expert.
     """
     global _record_expert_stats_use_triton
 
-    total_ids = topk_ids.numel()
+    if physical_topk_ids is None:
+        physical_topk_ids = logical_topk_ids
+    if phy_exp_num is None:
+        phy_exp_num = log_stats_buf.shape[1]
+
+    total_ids = logical_topk_ids.numel()
     if total_ids == 0:
         return
 
     if _record_expert_stats_use_triton:
         log_exp_num = log_stats_buf.shape[1]
         ep_size = gpu_loads_buf.shape[1]
-        experts_per_rank = ceil_div(log_exp_num, ep_size)
+        experts_per_rank = ceil_div(phy_exp_num, ep_size)
 
         BLOCK_SIZE = min(1024, triton.next_power_of_2(total_ids))
         grid = (ceil_div(total_ids, BLOCK_SIZE),)
         try:
             _record_expert_stats_kernel[grid](
-                topk_ids.contiguous(),
+                logical_topk_ids.contiguous(),
+                physical_topk_ids.contiguous(),
                 log_stats_buf,
                 gpu_loads_buf,
                 total_ids,
                 layer_idx,
                 log_exp_num,
+                phy_exp_num,
                 ep_size,
                 experts_per_rank,
                 BLOCK_SIZE=BLOCK_SIZE,
@@ -982,4 +1004,475 @@ def record_expert_stats(
                 exc_info=True,
             )
 
-    _record_expert_stats_torch(topk_ids, log_stats_buf, gpu_loads_buf, layer_idx)
+    _record_expert_stats_torch(
+        logical_topk_ids,
+        physical_topk_ids,
+        log_stats_buf,
+        gpu_loads_buf,
+        layer_idx,
+        phy_exp_num,
+    )
+
+
+def logical_to_physical_experts(
+    logical_ids: torch.Tensor,
+    log2phy: torch.Tensor,
+    logic_expert_cnt: torch.Tensor,
+    route_offset: int = 0,
+) -> torch.Tensor:
+    """Map logical routes to physical replicas without mutating logical IDs."""
+    if log2phy.dtype != torch.int32 or logic_expert_cnt.dtype != torch.int32:
+        raise TypeError("log2phy and logic_expert_cnt must be int32 tensors")
+    if log2phy.ndim != 2 or logic_expert_cnt.ndim != 1:
+        raise ValueError("log2phy must be 2-D and logic_expert_cnt must be 1-D")
+    if log2phy.shape[0] != logic_expert_cnt.shape[0]:
+        raise ValueError("log2phy and logic_expert_cnt logical dimensions differ")
+
+    flat_ids = logical_ids.reshape(-1).long()
+    counts = logic_expert_cnt.index_select(0, flat_ids)
+    positions = torch.arange(flat_ids.numel(), device=flat_ids.device)
+    replica_slots = torch.remainder(positions + route_offset, counts.long())
+    physical_ids = log2phy[flat_ids, replica_slots]
+    return physical_ids.to(logical_ids.dtype).view_as(logical_ids)
+
+
+# ---------------------------------------------------------------------------
+# Water-filling dispatch (ported from vLLM expander dispatch.py)
+#
+# GPU-side runtime quota computation: per-forward, per-layer, each rank
+# independently water-fills its local token demand across each expert's
+# replica GPUs.  Zero host synchronization.  Assumes <= 2 replicas per
+# expert (circulant placement guarantees this for x <= 2.0).
+# ---------------------------------------------------------------------------
+
+_wf_dispatch_use_triton = True
+
+
+@triton.jit
+def _wf_count_kernel(
+    topk_ids_ptr,
+    counts_ptr,
+    num_logical,
+    numel,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+    e = tl.load(topk_ids_ptr + offs, mask=mask, other=-1).to(tl.int32)
+    valid = mask & (e >= 0) & (e < num_logical)
+    safe_e = tl.where(valid, e, 0)
+    tl.atomic_add(counts_ptr + safe_e, 1.0, mask=valid)
+
+
+@triton.jit
+def _wf_quota_kernel(
+    counts_ptr,
+    hot_order_ptr,
+    cand_gpu_ptr,
+    rep_count_ptr,
+    quota_ptr,
+    alloc_ptr,
+    num_logical,
+    MAX_PASSES: tl.constexpr,
+    BLOCK_G: tl.constexpr,
+):
+    idx = tl.arange(0, BLOCK_G)
+    recv = tl.zeros([BLOCK_G], dtype=tl.float32)
+
+    for i in range(num_logical):
+        e = tl.load(hot_order_ptr + i)
+        c = tl.load(counts_ptr + e)
+        k = tl.load(rep_count_ptr + e)
+        g0 = tl.load(cand_gpu_ptr + e * 2 + 0)
+        g1 = tl.load(cand_gpu_ptr + e * 2 + 1)
+        s0 = tl.sum(tl.where(idx == g0, recv, 0.0))
+        s1 = tl.sum(tl.where(idx == g1, recv, 0.0))
+        # _fill2: closed-form 2-way water-fill
+        gap = tl.abs(s0 - s1)
+        level = (s0 + s1 + c) * 0.5
+        two_a0 = tl.where(s0 <= s1, tl.minimum(c, gap), 0.0)
+        two_a1 = tl.where(s0 <= s1, 0.0, tl.minimum(c, gap))
+        split0 = level - s0
+        split1 = level - s1
+        use_split = c > gap
+        a0_2 = tl.where(use_split, split0, two_a0)
+        a1_2 = tl.where(use_split, split1, two_a1)
+        a0 = tl.where(k == 2, a0_2, c)
+        a1 = tl.where(k == 2, a1_2, 0.0)
+        recv = recv + tl.where(idx == g0, a0, 0.0) + tl.where(idx == g1, a1, 0.0)
+        # _round2: largest-remainder integer rounding
+        ci = (c + 0.5).to(tl.int32)
+        f0 = tl.floor(a0)
+        f1 = tl.floor(a1)
+        i0 = f0.to(tl.int32)
+        i1 = f1.to(tl.int32)
+        rem = ci - i0 - i1
+        frac0 = a0 - f0
+        frac1 = a1 - f1
+        give0 = (rem == 1) & (frac0 >= frac1)
+        give1 = (rem == 1) & (frac1 > frac0)
+        q0 = i0 + give0.to(tl.int32)
+        q1 = i1 + give1.to(tl.int32)
+        q0 = tl.where(k == 2, q0, ci)
+        q1 = tl.where(k == 2, q1, 0)
+        tl.store(quota_ptr + e * 2 + 0, q0)
+        tl.store(quota_ptr + e * 2 + 1, q1)
+        tl.store(alloc_ptr + e * 2 + 0, a0)
+        tl.store(alloc_ptr + e * 2 + 1, a1)
+
+    for _p in range(MAX_PASSES - 1):
+        for i in range(num_logical):
+            e = tl.load(hot_order_ptr + i)
+            k = tl.load(rep_count_ptr + e)
+            c = tl.load(counts_ptr + e)
+            do = (k == 2) & (c > 0.0)
+            if do:
+                g0 = tl.load(cand_gpu_ptr + e * 2 + 0)
+                g1 = tl.load(cand_gpu_ptr + e * 2 + 1)
+                oa0 = tl.load(alloc_ptr + e * 2 + 0)
+                oa1 = tl.load(alloc_ptr + e * 2 + 1)
+                recv = (
+                    recv - tl.where(idx == g0, oa0, 0.0) - tl.where(idx == g1, oa1, 0.0)
+                )
+                s0 = tl.sum(tl.where(idx == g0, recv, 0.0))
+                s1 = tl.sum(tl.where(idx == g1, recv, 0.0))
+                gap = tl.abs(s0 - s1)
+                level = (s0 + s1 + c) * 0.5
+                two_a0 = tl.where(s0 <= s1, tl.minimum(c, gap), 0.0)
+                two_a1 = tl.where(s0 <= s1, 0.0, tl.minimum(c, gap))
+                split0 = level - s0
+                split1 = level - s1
+                use_split = c > gap
+                a0_2 = tl.where(use_split, split0, two_a0)
+                a1_2 = tl.where(use_split, split1, two_a1)
+                a0 = tl.where(k == 2, a0_2, c)
+                a1 = tl.where(k == 2, a1_2, 0.0)
+                recv = (
+                    recv + tl.where(idx == g0, a0, 0.0) + tl.where(idx == g1, a1, 0.0)
+                )
+                ci = (c + 0.5).to(tl.int32)
+                f0 = tl.floor(a0)
+                f1 = tl.floor(a1)
+                i0 = f0.to(tl.int32)
+                i1 = f1.to(tl.int32)
+                rem = ci - i0 - i1
+                frac0 = a0 - f0
+                frac1 = a1 - f1
+                give0 = (rem == 1) & (frac0 >= frac1)
+                give1 = (rem == 1) & (frac1 > frac0)
+                q0 = i0 + give0.to(tl.int32)
+                q1 = i1 + give1.to(tl.int32)
+                q0 = tl.where(k == 2, q0, ci)
+                q1 = tl.where(k == 2, q1, 0)
+                tl.store(quota_ptr + e * 2 + 0, q0)
+                tl.store(quota_ptr + e * 2 + 1, q1)
+                tl.store(alloc_ptr + e * 2 + 0, a0)
+                tl.store(alloc_ptr + e * 2 + 1, a1)
+
+
+@triton.jit
+def _wf_scatter_kernel(
+    topk_ids_ptr,
+    quota_ptr,
+    cand_phys_ptr,
+    rank_counter_ptr,
+    out_ids_ptr,
+    num_logical,
+    numel,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+    e = tl.load(topk_ids_ptr + offs, mask=mask, other=-1).to(tl.int32)
+    valid = mask & (e >= 0) & (e < num_logical)
+    safe_e = tl.where(valid, e, 0)
+    rank = tl.atomic_add(rank_counter_ptr + safe_e, 1, mask=valid)
+    q0 = tl.load(quota_ptr + safe_e * 2 + 0, mask=valid, other=0)
+    p0 = tl.load(cand_phys_ptr + safe_e * 2 + 0, mask=valid, other=-1)
+    p1 = tl.load(cand_phys_ptr + safe_e * 2 + 1, mask=valid, other=-1)
+    phys = tl.where(rank < q0, p0, p1)
+    phys = tl.where(valid, phys, -1)
+    tl.store(out_ids_ptr + offs, phys, mask=mask)
+
+
+# ---- torch fallback (PPU without triton compilation) ----
+
+
+def _wf_dispatch_torch(
+    flat_ids: torch.Tensor,
+    counts: torch.Tensor,
+    cand_gpu: torch.Tensor,
+    cand_phys: torch.Tensor,
+    rep_count: torch.Tensor,
+    quota: torch.Tensor,
+    rank_counter: torch.Tensor,
+    num_logical: int,
+    numel: int,
+    max_passes: int,
+) -> torch.Tensor:
+    """Pure-torch WF dispatch fallback (CPU waterfill, GPU scatter)."""
+    import numpy as np
+
+    device = flat_ids.device
+
+    # count on GPU → CPU
+    counts.zero_()
+    counts.scatter_add_(
+        0,
+        flat_ids.long().clamp(0, num_logical - 1),
+        torch.ones(numel, dtype=torch.float32, device=device),
+    )
+    counts_cpu = counts.cpu().numpy().astype(np.float64)
+
+    # waterfill on CPU (128 experts, microseconds). Recompute hot order from the
+    # freshly counted demand (the passed-in hot_order is stale).
+    hot_cpu = np.argsort(-counts_cpu, kind="stable")
+    cand_gpu_cpu = cand_gpu.cpu().numpy()
+    rep_cpu = rep_count.cpu().numpy()
+    alloc_cpu = np.zeros((num_logical, 2), dtype=np.float64)
+    quota_cpu = np.zeros((num_logical, 2), dtype=np.int32)
+    G = int(cand_gpu_cpu.max()) + 1 if cand_gpu_cpu.size > 0 else 1
+    recv = np.zeros(max(G, 1), dtype=np.float64)
+
+    for i in range(num_logical):
+        e = int(hot_cpu[i])
+        c = float(counts_cpu[e])
+        k = int(rep_cpu[e])
+        g0 = int(cand_gpu_cpu[e, 0])
+        g1 = int(cand_gpu_cpu[e, 1])
+        s0 = recv[g0] if g0 >= 0 else 0.0
+        s1 = recv[g1] if g1 >= 0 else 0.0
+        if k == 2 and c > 0:
+            gap = abs(s0 - s1)
+            level = (s0 + s1 + c) * 0.5
+            if c > gap:
+                a0 = level - s0
+                a1 = level - s1
+            elif s0 <= s1:
+                a0 = min(c, gap)
+                a1 = 0.0
+            else:
+                a0 = 0.0
+                a1 = min(c, gap)
+        else:
+            a0 = c
+            a1 = 0.0
+        if g0 >= 0:
+            recv[g0] += a0
+        if g1 >= 0:
+            recv[g1] += a1
+        alloc_cpu[e, 0] = a0
+        alloc_cpu[e, 1] = a1
+        ci = int(round(c))
+        f0, f1 = int(np.floor(a0)), int(np.floor(a1))
+        rem = ci - f0 - f1
+        if rem == 1:
+            if (a0 - f0) >= (a1 - f1):
+                f0 += 1
+            else:
+                f1 += 1
+        if k == 2:
+            quota_cpu[e, 0] = f0
+            quota_cpu[e, 1] = f1
+        else:
+            quota_cpu[e, 0] = ci
+            quota_cpu[e, 1] = 0
+
+    # coordinate descent passes
+    for _p in range(max_passes - 1):
+        for i in range(num_logical):
+            e = int(hot_cpu[i])
+            k = int(rep_cpu[e])
+            c = float(counts_cpu[e])
+            if k != 2 or c <= 0:
+                continue
+            g0 = int(cand_gpu_cpu[e, 0])
+            g1 = int(cand_gpu_cpu[e, 1])
+            oa0, oa1 = alloc_cpu[e, 0], alloc_cpu[e, 1]
+            if g0 >= 0:
+                recv[g0] -= oa0
+            if g1 >= 0:
+                recv[g1] -= oa1
+            s0 = recv[g0] if g0 >= 0 else 0.0
+            s1 = recv[g1] if g1 >= 0 else 0.0
+            gap = abs(s0 - s1)
+            level = (s0 + s1 + c) * 0.5
+            if c > gap:
+                a0 = level - s0
+                a1 = level - s1
+            elif s0 <= s1:
+                a0 = min(c, gap)
+                a1 = 0.0
+            else:
+                a0 = 0.0
+                a1 = min(c, gap)
+            if g0 >= 0:
+                recv[g0] += a0
+            if g1 >= 0:
+                recv[g1] += a1
+            alloc_cpu[e, 0] = a0
+            alloc_cpu[e, 1] = a1
+            ci = int(round(c))
+            f0, f1 = int(np.floor(a0)), int(np.floor(a1))
+            rem = ci - f0 - f1
+            if rem == 1:
+                if (a0 - f0) >= (a1 - f1):
+                    f0 += 1
+                else:
+                    f1 += 1
+            quota_cpu[e, 0] = f0
+            quota_cpu[e, 1] = f1
+
+    quota.copy_(torch.from_numpy(quota_cpu).to(device))
+
+    # scatter on GPU (sort-based, deterministic)
+    sorted_ids, sort_idx = torch.sort(flat_ids.long())
+    seg_counts = torch.zeros(num_logical, dtype=torch.int64, device=device)
+    seg_counts.scatter_add_(
+        0,
+        sorted_ids.clamp(0, num_logical - 1),
+        torch.ones(numel, dtype=torch.int64, device=device),
+    )
+    starts = torch.cat(
+        [torch.zeros(1, dtype=torch.int64, device=device), seg_counts.cumsum(0)[:-1]]
+    )
+    positions = torch.arange(numel, device=device, dtype=torch.int64)
+    ranks = positions - starts[sorted_ids.clamp(0, num_logical - 1)]
+    q0 = quota[sorted_ids.clamp(0, num_logical - 1).int(), 0].long()
+    p0 = cand_phys[sorted_ids.clamp(0, num_logical - 1).int(), 0].long()
+    p1 = cand_phys[sorted_ids.clamp(0, num_logical - 1).int(), 1].long()
+    phys = torch.where(ranks < q0, p0, p1)
+    out = torch.empty(numel, dtype=torch.int32, device=device)
+    out[sort_idx] = phys.int()
+    return out
+
+
+# ---- persistent scratch (module-level, lazy init per device) ----
+
+_wf_scratch = {}
+
+
+def _get_wf_scratch(num_logical: int, num_gpus: int, device: torch.device):
+    key = (num_logical, num_gpus, str(device))
+    if key not in _wf_scratch:
+        _wf_scratch[key] = {
+            "counts": torch.zeros(num_logical, dtype=torch.float32, device=device),
+            "quota": torch.empty((num_logical, 2), dtype=torch.int32, device=device),
+            "alloc": torch.empty((num_logical, 2), dtype=torch.float32, device=device),
+            "rank_counter": torch.zeros(num_logical, dtype=torch.int32, device=device),
+        }
+    return _wf_scratch[key]
+
+
+def wf_dispatch(
+    topk_ids: torch.Tensor,
+    log2phy: torch.Tensor,
+    logic_expert_cnt: torch.Tensor,
+    num_gpus: int,
+    num_physical: int,
+    policy: str = "iter",
+) -> torch.Tensor:
+    """GPU-side water-filling dispatch (per-forward, per-layer).
+
+    Replaces logical_to_physical_experts with quota-based replica selection.
+    log2phy / logic_expert_cnt remain pure placement data (unmodified).
+
+    Args:
+        topk_ids: [num_tokens, top_k] logical expert ids.
+        log2phy: [E, pad_k] int32, physical replica ids (-1 padded).
+        logic_expert_cnt: [E] int32, actual replica counts.
+        num_gpus: EP size (G).
+        num_physical: total physical experts (phy_exp_num).
+        policy: "wf" (1 pass) or "wf_iter" (8 passes coordinate descent).
+
+    Returns:
+        [num_tokens, top_k] physical expert ids.
+    """
+    global _wf_dispatch_use_triton
+
+    device = topk_ids.device
+    E = log2phy.shape[0]
+    experts_per_gpu = num_physical // num_gpus if num_gpus > 0 else 1
+    # cand_phys: [E, 2] first two replicas (-1 pad)
+    cand_phys = log2phy[:, :2].contiguous()
+    # cand_gpu: [E, 2] GPU id per replica (phys // experts_per_gpu)
+    cand_gpu = torch.where(
+        cand_phys >= 0,
+        cand_phys // experts_per_gpu,
+        torch.full_like(cand_phys, -1),
+    ).to(torch.int32)
+    rep_count = logic_expert_cnt.clamp(max=2).to(torch.int32)
+
+    flat = topk_ids.reshape(-1).to(torch.int32)
+    numel = flat.numel()
+    if numel == 0:
+        return topk_ids
+
+    scratch = _get_wf_scratch(E, num_gpus, device)
+    counts = scratch["counts"]
+    quota = scratch["quota"]
+    alloc = scratch["alloc"]
+    rank_counter = scratch["rank_counter"]
+    max_passes = 1 if policy == "wf" else 8
+
+    if _wf_dispatch_use_triton:
+        try:
+            counts.zero_()
+            BLOCK_SIZE = min(1024, triton.next_power_of_2(numel))
+            grid = (ceil_div(numel, BLOCK_SIZE),)
+            _wf_count_kernel[grid](
+                flat,
+                counts,
+                E,
+                numel,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+            hot_order = torch.argsort(counts, descending=True, stable=True)
+            block_g = max(1, triton.next_power_of_2(num_gpus))
+            _wf_quota_kernel[(1,)](
+                counts,
+                hot_order,
+                cand_gpu,
+                rep_count,
+                quota,
+                alloc,
+                E,
+                MAX_PASSES=max_passes,
+                BLOCK_G=block_g,
+            )
+            rank_counter.zero_()
+            out_flat = torch.empty(numel, dtype=torch.int32, device=device)
+            _wf_scatter_kernel[grid](
+                flat,
+                quota,
+                cand_phys,
+                rank_counter,
+                out_flat,
+                E,
+                numel,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+            return out_flat.view_as(topk_ids)
+        except Exception:
+            _wf_dispatch_use_triton = False
+            logger.warning(
+                "triton WF dispatch unavailable, falling back to torch",
+                exc_info=True,
+            )
+
+    # torch fallback
+    out_flat = _wf_dispatch_torch(
+        flat,
+        counts,
+        cand_gpu,
+        cand_phys,
+        rep_count,
+        quota,
+        rank_counter,
+        E,
+        numel,
+        max_passes,
+    )
+    return out_flat.view_as(topk_ids)

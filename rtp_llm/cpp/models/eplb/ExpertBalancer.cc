@@ -164,6 +164,8 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                size_t                       hidden_size,
                                size_t                       ep_rank,
                                size_t                       ep_size,
+                               size_t                       stats_replication_size,
+                               bool                         is_report_rank,
                                py::object                   py_eplb,
                                DataType                     dtype,
                                QuantAlgo                    quant_algo,
@@ -173,6 +175,8 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     num_physic_experts_(phy_exp_num),
     ep_rank_(ep_rank),
     ep_size_(ep_size),
+    stats_replication_size_(stats_replication_size),
+    is_report_rank_(is_report_rank),
     metrics_reporter_(metrics_reporter),
     eplb_python_wrapper_(py_eplb) {
     cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
@@ -257,19 +261,33 @@ void ExpertBalancer::syncController() {
 }
 
 void ExpertBalancer::reportStats(OverallExpertStats& stats) {
-    if (metrics_reporter_
-        && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
-        int layer_num = stats.layer_num;
-        executor_collector_.gpu_loads.resize(layer_num);
-        executor_collector_.ep_rank = ep_rank_;
+    if (!eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
+        return;
+    }
 
-        auto gpu_loads_tensor = stats.stats_buf.gpu_loads_buf.cpu();
-        int* gpu_loads        = gpu_loads_tensor.data_ptr<int>();
+    // Every rank must participate in the collective. Only the designated report
+    // rank publishes the resulting EP columns, avoiding duplicate metric writers.
+    auto gpu_loads_aggregated = stats.stats_buf.gpu_loads_buf.clone();
+    if (isCommOpsRegistered()) {
+        execAllReduce({gpu_loads_aggregated, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    }
+    if (stats_replication_size_ > 1) {
+        gpu_loads_aggregated.div_(static_cast<int64_t>(stats_replication_size_), "trunc");
+    }
+    if (!is_report_rank_ || !metrics_reporter_) {
+        return;
+    }
 
+    const int layer_num = stats.layer_num;
+    executor_collector_.gpu_loads.resize(layer_num);
+    auto gpu_loads_tensor = gpu_loads_aggregated.cpu();
+    int* gpu_loads        = gpu_loads_tensor.data_ptr<int>();
+
+    for (size_t report_ep_rank = 0; report_ep_rank < ep_size_; ++report_ep_rank) {
+        executor_collector_.ep_rank = report_ep_rank;
         for (int i = 0; i < layer_num; ++i) {
-            executor_collector_.gpu_loads[i] = gpu_loads[i * ep_size_ + ep_rank_];
+            executor_collector_.gpu_loads[i] = gpu_loads[i * ep_size_ + report_ep_rank];
         }
-
         metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
     }
 }
@@ -464,6 +482,10 @@ void ExpertBalancer::createPlan() {
         execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
         execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
     }
+    if (stats_replication_size_ > 1) {
+        stats_.log_stats_gpu.div_(static_cast<int64_t>(stats_replication_size_), "trunc");
+        stats_.gpu_loads_gpu.div_(static_cast<int64_t>(stats_replication_size_), "trunc");
+    }
 
     // copy stats gpu tensor to host tensor [implicit sync]
     stats_.log_stats.copy_(stats_.log_stats_gpu);
@@ -530,37 +552,28 @@ void ExpertBalancer::applyPlanWeights(ModelBase& model) {
     auto& balanced_layer = model.weights_.layers[result.layer_id].ffn_weights;
 
     // Exchange DenseWeights kernel/scales/zeros with eplb plan tensors.
-    auto exchange_dense_weight = [&result](DenseWeights& dense, torch::Tensor& plan_weight, torch::Tensor& plan_scale) {
-        auto old_kernel = dense.kernel;
-        auto old_scales = dense.scales;
-        auto old_zeros  = dense.zeros;
-
-        // Set model weights from plan tensors
-        dense.kernel = plan_weight;
-        if (result.is_quantized) {
-            dense.scales = plan_scale;
-            dense.zeros  = torch::Tensor();
-        } else {
-            dense.scales = torch::Tensor();
-            dense.zeros  = torch::Tensor();
-        }
-
-        // Store old model weights back into plan tensors for next cycle
-        plan_weight = old_kernel;
-        if (result.is_quantized && old_scales.defined()) {
-            plan_scale = old_scales;
-        }
+    auto exchange_tensor_data = [](torch::Tensor& model_tensor, torch::Tensor& plan_tensor) {
+        auto old_data = model_tensor.clone();
+        model_tensor.copy_(plan_tensor);
+        plan_tensor.copy_(old_data);
     };
 
-    // Exchange torch::Tensor directly (for non-quantized fields)
-    auto exchange_tensors = [](torch::Tensor& model_tensor, torch::Tensor& plan_tensor) {
-        std::swap(model_tensor, plan_tensor);
-    };
+    auto exchange_dense_weight =
+        [&result, &exchange_tensor_data](DenseWeights& dense, torch::Tensor& plan_weight, torch::Tensor& plan_scale) {
+            exchange_tensor_data(dense.kernel, plan_weight);
+            if (result.is_quantized) {
+                exchange_tensor_data(dense.scales, plan_scale);
+                dense.zeros = torch::Tensor();
+            } else {
+                dense.scales = torch::Tensor();
+                dense.zeros  = torch::Tensor();
+            }
+        };
 
     exchange_dense_weight(*balanced_layer.moe_gate_weight, result.moe_weight_1, result.moe_scale_1);
     exchange_dense_weight(*balanced_layer.moe_down_weight, result.moe_weight_2, result.moe_scale_2);
-    exchange_tensors(balanced_layer.log2phy, result.log2phy);
-    exchange_tensors(balanced_layer.logic_expert_cnt, result.logic_expert_cnt);
+    exchange_tensor_data(balanced_layer.log2phy, result.log2phy);
+    exchange_tensor_data(balanced_layer.logic_expert_cnt, result.logic_expert_cnt);
 }
 
 bool ExpertBalancer::syncPlanWeightsLoadStatus() {

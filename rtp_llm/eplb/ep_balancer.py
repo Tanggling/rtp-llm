@@ -2,6 +2,7 @@ import datetime
 import gc
 import json
 import logging
+import os
 import random
 import time
 import traceback
@@ -15,6 +16,7 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device import get_current_device
 from rtp_llm.eplb.eplb import rebalance_experts
+from rtp_llm.eplb.plan_policies import build_circulant_plan
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -91,6 +93,9 @@ class ExpertBalancer:
         self.num_experts = self._load_config.expert_num
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Write gpu_load_*.json into the per-arm stats dir (with the eplb_stats
+        # exports) instead of the process CWD; falls back to CWD when unset.
+        self.gpu_load_dir = os.environ.get("EPLB_STATS_EXPORT_DIR", "")
         self.queue: Queue[int] = Queue()
 
         # Get balance_method from model_config.eplb_config
@@ -126,6 +131,28 @@ class ExpertBalancer:
             eplb_force_repack = model_config.eplb_config.eplb_force_repack
 
         self.force_repack = eplb_force_repack == 1
+
+        # Plan policy switches (see rtp_llm/eplb/plan_policies.py):
+        #   EPLB_PLACEMENT: eplb (default, load-aware) | circulant (static spectral placement)
+        #   EPLB_DISPATCH_POLICY: rr (default round-robin) | wf | wf_iter (water-fill quotas)
+        self.placement_policy = os.environ.get("EPLB_PLACEMENT", "eplb")
+        self.dispatch_policy = os.environ.get("EPLB_DISPATCH_POLICY", "rr")
+        self._circulant_plan: Optional[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = None
+        if self.placement_policy == "circulant":
+            phy2log_np, log2phy_np, logcnt_np = build_circulant_plan(
+                self.num_experts, self.num_replicas, self.num_gpu
+            )
+            self._circulant_plan = (
+                torch.from_numpy(phy2log_np).unsqueeze(0),
+                torch.from_numpy(log2phy_np).unsqueeze(0),
+                torch.from_numpy(logcnt_np).unsqueeze(0),
+            )
+        logging.info(
+            f"EPLB plan policies: placement={self.placement_policy}, "
+            f"dispatch={self.dispatch_policy}"
+        )
 
     @torch.inference_mode()
     def get_balanced_layer(self, gpu_loads: torch.Tensor) -> int:
@@ -178,18 +205,21 @@ class ExpertBalancer:
         logging.info(log_stats)
         self.log_exp_cnt.copy_(log_stats)
 
-        file_name = f"gpu_load_{self.time_prefix}.json"
+        file_name = os.path.join(self.gpu_load_dir, f"gpu_load_{self.time_prefix}.json")
 
         layer_id = self.get_balanced_layer(gpu_loads)
 
-        phy2log, log2phy, logcnt = rebalance_experts(
-            log_stats[layer_id : layer_id + 1],
-            self.num_replicas,
-            self.num_groups,
-            self.num_nodes,
-            self.num_gpu,
-            self.force_repack,
-        )
+        if self._circulant_plan is not None:
+            phy2log, log2phy, logcnt = self._circulant_plan
+        else:
+            phy2log, log2phy, logcnt = rebalance_experts(
+                log_stats[layer_id : layer_id + 1],
+                self.num_replicas,
+                self.num_groups,
+                self.num_nodes,
+                self.num_gpu,
+                self.force_repack,
+            )
 
         self.phy2log[layer_id] = phy2log.tolist()
         log_data = {
@@ -199,6 +229,8 @@ class ExpertBalancer:
             "layer": layer_id,
             "plan": phy2log.tolist(),
             "phy2log": self.phy2log,
+            "placement": self.placement_policy,
+            "dispatch": self.dispatch_policy,
             "update_time": time.ctime(),
         }
         with open(file_name, "a") as f:
@@ -213,13 +245,14 @@ class ExpertBalancer:
 
         k = log2phy.shape[-1]
         log2phy_pad[:, :k] = log2phy[0]
+        logcnt_out = logcnt[0]
 
         logging.info(f"[EPLB_py PLAN] phy2log for layer {layer_id}: {phy2log[0]}")
         gc.collect()
         dtype = torch.int32
         return (
             torch.tensor([layer_id], dtype=torch.int32).contiguous(),
-            logcnt[0].to(dtype).contiguous(),
+            logcnt_out.to(dtype).contiguous(),
             log2phy_pad.to(dtype).contiguous(),
             phy2log[0].to(dtype).contiguous(),
         )

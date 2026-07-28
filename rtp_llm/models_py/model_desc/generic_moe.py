@@ -1,7 +1,14 @@
+import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
+
+_LOGGER = logging.getLogger(__name__)
+
+# env-gated prefill cudaEvent timing probe (PREFILL_PROF=1)
+_PREFILL_PROF = os.environ.get("PREFILL_PROF", "0") == "1"
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -26,7 +33,11 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.triton_kernels.moe.ep_kernels import record_expert_stats
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    logical_to_physical_experts,
+    record_expert_stats,
+    wf_dispatch,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -83,6 +94,20 @@ class GenericMoeLayer(nn.Module):
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
+        self.log2phy = weights.get(W.log2phy, None)
+        self.logic_expert_cnt = weights.get(W.logic_expert_cnt, None)
+        if (self.log2phy is None) != (self.logic_expert_cnt is None):
+            raise ValueError("log2phy and logic_expert_cnt must be provided together")
+
+        # EPLB log2phy debug: sampled dump of layout and dispatch.
+        # EPLB_LOG2PHY_DEBUG=N prints once every N forwards (0 disables).
+        self._log2phy_dbg_interval = int(os.environ.get("EPLB_LOG2PHY_DEBUG", "0"))
+        self._log2phy_dbg_cnt = 0
+        self._logical_expert_num = config.expert_num
+        # Dispatch policy: "rr" (uniform round-robin) or "wf"/"wf_iter"
+        # (GPU-side water-filling quota, see ep_kernels.wf_dispatch).
+        self._dispatch_policy = os.environ.get("EPLB_DISPATCH_POLICY", "rr")
+
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
         assert (
@@ -121,6 +146,49 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+
+        if (
+            self._log2phy_dbg_interval > 0
+            and self.log2phy is not None
+            and self.layer_idx == 0
+        ):
+            self._dbg_dump_layout()
+
+    def _dbg_rank(self) -> str:
+        pc = self.parallelism_config
+        parts = []
+        for name in ("world_rank", "tp_rank", "dp_rank", "ep_rank"):
+            v = getattr(pc, name, None)
+            if v is not None:
+                parts.append(f"{name}={v}")
+        return " ".join(parts)
+
+    def _dbg_dump_layout(self) -> None:
+        log2phy = self.log2phy.detach().cpu()
+        cnt = self.logic_expert_cnt.detach().cpu()
+        logical = min(8, self._logical_expert_num)
+        lines = [
+            f"[EPLB-DBG][{self._dbg_rank()}] layer {self.layer_idx} layout: "
+            f"phy_exp_num={self.num_experts}, logical_exp_num={self._logical_expert_num}, "
+            f"ep_size={self.ep_size}, local_experts={self.num_local_experts}"
+        ]
+        for l in range(logical):
+            c = int(cnt[l])
+            replicas = log2phy[l, :c].tolist()
+            lines.append(f"  logical {l}: cnt={c}, physical={replicas}")
+        print("\n".join(lines), flush=True)
+
+    def _dbg_dump_dispatch(self, logical_ids, physical_ids) -> None:
+        k = min(4, logical_ids.shape[0])
+        logical = logical_ids[:k].detach().cpu().tolist()
+        physical = physical_ids[:k].detach().cpu().tolist()
+        print(
+            f"[EPLB-DBG][{self._dbg_rank()}] layer {self.layer_idx} "
+            f"step {self._log2phy_dbg_cnt} dispatch (first {k} tokens)\n"
+            f"  logical : {logical}\n"
+            f"  physical: {physical}",
+            flush=True,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -166,12 +234,42 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        logical_topk_ids = topk_ids
+        if self.log2phy is not None:
+            if self._dispatch_policy in ("wf", "wf_iter"):
+                topk_ids = wf_dispatch(
+                    logical_topk_ids,
+                    self.log2phy,
+                    self.logic_expert_cnt,
+                    self.ep_size,
+                    self.num_experts,
+                    policy=self._dispatch_policy,
+                )
+            else:
+                topk_ids = logical_to_physical_experts(
+                    logical_topk_ids,
+                    self.log2phy,
+                    self.logic_expert_cnt,
+                    self.parallelism_config.dp_rank,
+                )
+
+        if (
+            self._log2phy_dbg_interval > 0
+            and self.log2phy is not None
+            and self.layer_idx == 0
+        ):
+            self._log2phy_dbg_cnt += 1
+            if self._log2phy_dbg_cnt % self._log2phy_dbg_interval == 0:
+                self._dbg_dump_dispatch(logical_topk_ids, topk_ids)
+
         if self.expert_stats is not None:
             record_expert_stats(
-                topk_ids,
+                logical_topk_ids,
                 self.expert_stats.log_stats_buf,
                 self.expert_stats.gpu_loads_buf,
                 self.layer_idx,
+                topk_ids,
+                self.num_experts,
             )
 
         is_ep_mode = self.ep_size > 1
@@ -381,6 +479,11 @@ class GenericMoeModel(GptModelBase):
         return result
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        prof = _PREFILL_PROF and inputs.attention_inputs.is_prefill
+        if prof:
+            start_ev = torch.cuda.Event(enable_timing=True)
+            end_ev = torch.cuda.Event(enable_timing=True)
+            start_ev.record()
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
@@ -401,6 +504,15 @@ class GenericMoeModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
+        if prof:
+            end_ev.record()
+            torch.cuda.synchronize()
+            _LOGGER.warning(
+                "[PREFILL_PROF] rank=%d prefill_ms=%.3f tokens=%d",
+                self.parallelism_config.tp_rank,
+                start_ev.elapsed_time(end_ev),
+                input_ids.numel(),
+            )
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 

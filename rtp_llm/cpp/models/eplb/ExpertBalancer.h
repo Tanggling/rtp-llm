@@ -96,6 +96,8 @@ public:
                                                           size_t                       hidden_size,
                                                           size_t                       ep_rank,
                                                           size_t                       ep_size,
+                                                          size_t                       stats_replication_size,
+                                                          bool                         is_report_rank,
                                                           py::object                   py_eplb,
                                                           DataType                     dtype,
                                                           QuantAlgo                    quant_algo,
@@ -138,8 +140,10 @@ private:
 
     size_t eplb_plan_cnt_ = 0;
 
-    size_t ep_rank_ = 0;
-    size_t ep_size_ = 1;
+    size_t ep_rank_                = 0;
+    size_t ep_size_                = 1;
+    size_t stats_replication_size_ = 1;
+    bool   is_report_rank_         = true;
 
     size_t balance_layer_cnt_      = 0;
     size_t balance_layer_per_step_ = 1;

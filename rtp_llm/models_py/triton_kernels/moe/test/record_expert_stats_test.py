@@ -9,6 +9,7 @@ import torch
 from rtp_llm.models_py.triton_kernels.moe import ep_kernels
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     _record_expert_stats_torch,
+    logical_to_physical_experts,
     record_expert_stats,
 )
 
@@ -149,7 +150,9 @@ class TorchFallbackTest(unittest.TestCase):
     def check_torch(self, topk_ids, layer_num, log_exp_num, ep_size, layer_idx):
         got_log = torch.zeros(layer_num, log_exp_num, dtype=torch.int32)
         got_gpu = torch.zeros(layer_num, ep_size, dtype=torch.int32)
-        _record_expert_stats_torch(topk_ids, got_log, got_gpu, layer_idx)
+        _record_expert_stats_torch(
+            topk_ids, topk_ids, got_log, got_gpu, layer_idx, log_exp_num
+        )
         want_log, want_gpu = reference_expert_stats(
             topk_ids, layer_num, log_exp_num, ep_size, layer_idx
         )
@@ -239,6 +242,55 @@ class ExpertStatsWiringTest(unittest.TestCase):
         model = GptModelBase.__new__(GptModelBase)
         self.assertTrue(GptModelBase.initialize(model, FakeInitResource()))
         self.assertIsNone(model.expert_stats)
+
+
+class Log2PhyDispatchTest(unittest.TestCase):
+    def test_mock_plan_update_is_applied_to_next_dispatch(self):
+        logical_ids = torch.tensor([[0, 0], [1, 1]], dtype=torch.int32)
+        logic_expert_cnt = torch.tensor([2, 2], dtype=torch.int32)
+        log2phy = torch.tensor([[0, 2], [1, 3]], dtype=torch.int32)
+
+        first = logical_to_physical_experts(logical_ids, log2phy, logic_expert_cnt)
+        self.assertTrue(
+            torch.equal(first, torch.tensor([[0, 2], [1, 3]], dtype=torch.int32))
+        )
+
+        # Mimic ExpertBalancer::applyPlanWeights: update the existing tensor
+        # object so a layer that already captured it sees the new plan.
+        captured_mapping = log2phy
+        mock_plan = torch.tensor([[2, 0], [3, 1]], dtype=torch.int32)
+        log2phy.copy_(mock_plan)
+        self.assertIs(captured_mapping, log2phy)
+
+        second = logical_to_physical_experts(
+            logical_ids, captured_mapping, logic_expert_cnt
+        )
+        self.assertTrue(
+            torch.equal(second, torch.tensor([[2, 0], [3, 1]], dtype=torch.int32))
+        )
+        self.assertFalse(torch.equal(first, second))
+
+    def test_stats_use_logical_heat_and_physical_ep_placement(self):
+        logical_ids = torch.tensor([[0, 0], [1, 1]], dtype=torch.int32)
+        physical_ids = torch.tensor([[0, 4], [1, 5]], dtype=torch.int32)
+        log_stats = torch.zeros(1, 2, dtype=torch.int32)
+        gpu_loads = torch.zeros(1, 2, dtype=torch.int32)
+
+        _record_expert_stats_torch(
+            logical_ids,
+            physical_ids,
+            log_stats,
+            gpu_loads,
+            layer_idx=0,
+            phy_exp_num=6,
+        )
+
+        self.assertTrue(
+            torch.equal(log_stats, torch.tensor([[2, 2]], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(gpu_loads, torch.tensor([[2, 2]], dtype=torch.int32))
+        )
 
 
 if __name__ == "__main__":

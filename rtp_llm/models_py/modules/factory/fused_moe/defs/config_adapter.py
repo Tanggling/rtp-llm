@@ -45,7 +45,8 @@ class MoEConfigAdapter:
         # Calculate local_rank from world_rank and local_world_size
         self.local_rank = parallelism_config.local_rank
 
-        self.expert_num = model_config.expert_num
+        self.logical_expert_num = model_config.expert_num
+        self.expert_num = model_config.eplb_config.phy_exp_num(model_config.expert_num)
         self.moe_k = model_config.moe_k
         self.moe_topk_group = model_config.moe_topk_group
         self.hidden_size = model_config.hidden_size
