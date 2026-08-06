@@ -134,7 +134,7 @@ class ExpertBalancer:
 
         # Plan policy switches (see rtp_llm/eplb/plan_policies.py):
         #   EPLB_PLACEMENT: eplb (default, load-aware) | circulant (static spectral placement)
-        #   EPLB_DISPATCH_POLICY: rr (default round-robin) | wf | wf_iter (water-fill quotas)
+        #   EPLB_DISPATCH_POLICY: rr | wf | wf_iter | wf_k (general replica count)
         self.placement_policy = os.environ.get("EPLB_PLACEMENT", "eplb")
         self.dispatch_policy = os.environ.get("EPLB_DISPATCH_POLICY", "rr")
         self._circulant_plan: Optional[
@@ -149,9 +149,42 @@ class ExpertBalancer:
                 torch.from_numpy(log2phy_np).unsqueeze(0),
                 torch.from_numpy(logcnt_np).unsqueeze(0),
             )
+        self._circulant_applied = False
+
         logging.info(
             f"EPLB plan policies: placement={self.placement_policy}, "
             f"dispatch={self.dispatch_policy}"
+        )
+
+    def is_circulant_mode(self) -> bool:
+        return self.placement_policy == "circulant"
+
+    def get_moe_layer_ids(self):
+        return list(self.moe_layer_index)
+
+    @torch.inference_mode()
+    def create_circulant_plan_for_layer(self, layer_id: int):
+        assert self._circulant_plan is not None
+        phy2log, log2phy, logcnt = self._circulant_plan
+
+        self.phy2log[layer_id] = phy2log[0].tolist()
+
+        pad_k = self.num_replicas - self.num_experts + 1
+        log2phy_pad = torch.full((self.num_experts, pad_k), -1, dtype=torch.int32)
+        k = log2phy.shape[-1]
+        log2phy_pad[:, :k] = log2phy[0]
+        logcnt_out = logcnt[0]
+        dtype = torch.int32
+
+        logging.info(
+            f"[EPLB_py CIRCULANT] plan for layer {layer_id}: " f"phy2log={phy2log[0]}"
+        )
+        gc.collect()
+        return (
+            torch.tensor([layer_id], dtype=dtype).contiguous(),
+            logcnt_out.to(dtype).contiguous(),
+            log2phy_pad.to(dtype).contiguous(),
+            phy2log[0].to(dtype).contiguous(),
         )
 
     @torch.inference_mode()
@@ -221,7 +254,7 @@ class ExpertBalancer:
                 self.force_repack,
             )
 
-        self.phy2log[layer_id] = phy2log.tolist()
+        self.phy2log[layer_id] = phy2log[0].tolist()
         log_data = {
             "update_cnt": self.update_cnt,
             "gpu_loads": gpu_loads.tolist(),
@@ -280,10 +313,11 @@ class ExpertBalancer:
             res = moe_weight.load(
                 DatabaseTensorSource(self.database), layer_id, "cpu", self._load_config
             )
-        except:
+        except Exception:
             logging.error(
                 f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer failed: 完整堆栈:\n{traceback.format_exc()}"
             )
+            raise
 
         logging.info(
             f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} done"

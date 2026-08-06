@@ -10,6 +10,8 @@ _LOGGER = logging.getLogger(__name__)
 # env-gated prefill cudaEvent timing probe (PREFILL_PROF=1)
 _PREFILL_PROF = os.environ.get("PREFILL_PROF", "0") == "1"
 
+_MOE_TOPK_EXPORT_DIR = os.environ.get("MOE_TOPK_EXPORT_DIR", "")
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -37,6 +39,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     logical_to_physical_experts,
     record_expert_stats,
     wf_dispatch,
+    wf_k_dispatch,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
@@ -61,6 +64,7 @@ class GenericMoeLayer(nn.Module):
         self.config = config
         self.parallelism_config = parallelism_config
         self.layer_idx = layer_idx
+        self._topk_call_count = 0
         # ExpertStatsBuffer, assigned by the model in initialize() when EPLB is enabled
         self.expert_stats = None
 
@@ -104,8 +108,8 @@ class GenericMoeLayer(nn.Module):
         self._log2phy_dbg_interval = int(os.environ.get("EPLB_LOG2PHY_DEBUG", "0"))
         self._log2phy_dbg_cnt = 0
         self._logical_expert_num = config.expert_num
-        # Dispatch policy: "rr" (uniform round-robin) or "wf"/"wf_iter"
-        # (GPU-side water-filling quota, see ep_kernels.wf_dispatch).
+        # Dispatch policy: "rr", "wf"/"wf_iter" (optimized for <=2 replicas),
+        # or "wf_k" (general replica count, deliberately CPU-oriented).
         self._dispatch_policy = os.environ.get("EPLB_DISPATCH_POLICY", "rr")
 
         self.w1 = weights.get(W.moe_w1, None)
@@ -236,7 +240,15 @@ class GenericMoeLayer(nn.Module):
 
         logical_topk_ids = topk_ids
         if self.log2phy is not None:
-            if self._dispatch_policy in ("wf", "wf_iter"):
+            if self._dispatch_policy == "wf_k":
+                topk_ids = wf_k_dispatch(
+                    logical_topk_ids,
+                    self.log2phy,
+                    self.logic_expert_cnt,
+                    self.ep_size,
+                    self.num_experts,
+                )
+            elif self._dispatch_policy in ("wf", "wf_iter"):
                 topk_ids = wf_dispatch(
                     logical_topk_ids,
                     self.log2phy,
@@ -270,6 +282,26 @@ class GenericMoeLayer(nn.Module):
                 self.layer_idx,
                 topk_ids,
                 self.num_experts,
+            )
+
+        if _MOE_TOPK_EXPORT_DIR and self.parallelism_config.dp_rank == 0:
+            step = self._topk_call_count
+            self._topk_call_count += 1
+            export_path = os.path.join(
+                _MOE_TOPK_EXPORT_DIR,
+                f"layer_{self.layer_idx:03d}_step_{step:06d}.pt",
+            )
+            torch.save(
+                {
+                    "layer_idx": self.layer_idx,
+                    "step": step,
+                    "logical_topk_ids": logical_topk_ids.cpu(),
+                    "topk_weights": topk_weights.cpu(),
+                    "num_tokens": num_tokens,
+                    "num_experts": self.num_experts,
+                    "top_k": self.top_k,
+                },
+                export_path,
             )
 
         is_ep_mode = self.ep_size > 1

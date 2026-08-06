@@ -48,6 +48,10 @@ public:
 
     void loadBalanceWeight(int ep_rank, int ep_size, EplbPlanTensors& eplb_plan);
 
+    std::vector<int> getMoeLayerIds();
+
+    void createCirculantPlanForLayer(int layer_id, EplbPlanTensors& eplb_plan);
+
 private:
     py::object py_eplb_;
 };

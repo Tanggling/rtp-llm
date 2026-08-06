@@ -1036,6 +1036,151 @@ def logical_to_physical_experts(
     return physical_ids.to(logical_ids.dtype).view_as(logical_ids)
 
 
+def _fill_k(loads, demand):
+    """Split demand over arbitrary candidate loads by exact water filling."""
+    import numpy as np
+
+    loads = np.asarray(loads, dtype=np.float64)
+    allocation = np.zeros_like(loads)
+    if demand <= 0 or loads.size == 0:
+        return allocation
+
+    order = np.argsort(loads, kind="stable")
+    sorted_loads = loads[order]
+    remaining = float(demand)
+    active = 1
+    while active < sorted_loads.size:
+        delta = sorted_loads[active] - sorted_loads[active - 1]
+        cost = delta * active
+        if remaining <= cost:
+            allocation[order[:active]] += remaining / active
+            return allocation
+        allocation[order[:active]] += delta
+        remaining -= cost
+        active += 1
+    allocation[order] += remaining / sorted_loads.size
+    return allocation
+
+
+def _largest_remainder(values, total):
+    """Round non-negative allocations while preserving their exact total."""
+    import numpy as np
+
+    values = np.asarray(values, dtype=np.float64)
+    result = np.floor(values).astype(np.int64)
+    remainder = int(total) - int(result.sum())
+    if remainder > 0:
+        fractions = values - result
+        order = np.argsort(-fractions, kind="stable")
+        result[order[:remainder]] += 1
+    elif remainder < 0:
+        fractions = values - result
+        order = np.argsort(fractions, kind="stable")
+        for idx in order:
+            if remainder == 0:
+                break
+            take = min(int(result[idx]), -remainder)
+            result[idx] -= take
+            remainder += take
+    return result
+
+
+def wf_k_dispatch(
+    topk_ids: torch.Tensor,
+    log2phy: torch.Tensor,
+    logic_expert_cnt: torch.Tensor,
+    num_gpus: int,
+    num_physical: int,
+    max_passes: int = 8,
+) -> torch.Tensor:
+    """General water-filling dispatch for EPLB layouts with any replica count.
+
+    This implementation intentionally favors clarity over speed. It computes
+    quotas on CPU, supports multiple replicas of an expert on the same GPU, and
+    copies only the final physical ids back to the input device.
+    """
+    import numpy as np
+
+    if num_gpus <= 0 or num_physical <= 0:
+        raise ValueError("num_gpus and num_physical must be positive")
+    if num_physical % num_gpus != 0:
+        raise ValueError("num_physical must be divisible by num_gpus")
+    if max_passes <= 0:
+        raise ValueError("max_passes must be positive")
+
+    original_shape = topk_ids.shape
+    original_dtype = topk_ids.dtype
+    flat = topk_ids.detach().reshape(-1).long().cpu().numpy()
+    if flat.size == 0:
+        return topk_ids.clone()
+
+    l2p = log2phy.detach().long().cpu().numpy()
+    replica_count = logic_expert_cnt.detach().long().cpu().numpy()
+    num_logical = l2p.shape[0]
+    if np.any(flat < 0) or np.any(flat >= num_logical):
+        raise ValueError("topk_ids contains an invalid logical expert id")
+    if np.any(replica_count <= 0) or np.any(replica_count > l2p.shape[1]):
+        raise ValueError("logic_expert_cnt is inconsistent with log2phy")
+
+    experts_per_gpu = num_physical // num_gpus
+    counts = np.bincount(flat, minlength=num_logical).astype(np.int64)
+    hot_order = np.argsort(-counts, kind="stable")
+    allocation = np.zeros_like(l2p, dtype=np.float64)
+    recv = np.zeros(num_gpus, dtype=np.float64)
+
+    for pass_idx in range(max_passes):
+        for expert in hot_order:
+            demand = int(counts[expert])
+            k = int(replica_count[expert])
+            physical = l2p[expert, :k]
+            if np.any(physical < 0) or np.any(physical >= num_physical):
+                raise ValueError("log2phy contains an invalid physical expert id")
+            gpus = physical // experts_per_gpu
+
+            if pass_idx > 0:
+                for replica_idx, gpu in enumerate(gpus):
+                    recv[gpu] -= allocation[expert, replica_idx]
+
+            unique_gpus = np.unique(gpus)
+            gpu_allocation = _fill_k(recv[unique_gpus], demand)
+            allocation[expert, :k] = 0.0
+            for gpu, gpu_demand in zip(unique_gpus, gpu_allocation):
+                replica_indices = np.flatnonzero(gpus == gpu)
+                allocation[expert, replica_indices] = gpu_demand / len(replica_indices)
+                recv[gpu] += gpu_demand
+
+    quotas = np.zeros_like(l2p, dtype=np.int64)
+    for expert in range(num_logical):
+        k = int(replica_count[expert])
+        quotas[expert, :k] = _largest_remainder(
+            allocation[expert, :k], int(counts[expert])
+        )
+
+    sort_idx = np.argsort(flat, kind="stable")
+    sorted_output = np.empty_like(flat, dtype=np.int64)
+    starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+    for expert in range(num_logical):
+        expert_start = int(starts[expert])
+        assigned = 0
+        for replica_idx in range(int(replica_count[expert])):
+            end = assigned + int(quotas[expert, replica_idx])
+            sorted_output[expert_start + assigned : expert_start + end] = l2p[
+                expert, replica_idx
+            ]
+            assigned = end
+        if assigned != int(counts[expert]):
+            raise RuntimeError("wf_k quota does not conserve expert demand")
+
+    output = np.empty_like(flat, dtype=np.int64)
+    output[sort_idx] = sorted_output
+
+    return (
+        torch.from_numpy(output)
+        .to(topk_ids.device, dtype=original_dtype)
+        .view(original_shape)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Water-filling dispatch (ported from vLLM expander dispatch.py)
 #

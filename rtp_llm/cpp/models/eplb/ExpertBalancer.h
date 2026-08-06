@@ -125,6 +125,7 @@ private:
     bool syncPlanWeightsLoadStatus();
     void processPlanWeights();
     void applyPlanWeights(ModelBase& model);
+    void applyCirculantAllLayers(ModelBase& model);
 
     // helpful functions
     void copyFromTensor(const torch::Tensor& src, torch::Tensor& dst);
@@ -163,6 +164,9 @@ private:
     mutable std::mutex eplb_plan_status_mutex_;
 
     bool test_mode_ = false;
+
+    bool circulant_mode_    = false;
+    bool circulant_applied_ = false;
 
     // STATS-mode export: periodically dump accumulated activation counts to JSON
     int64_t       stats_export_step_ = 0;  // 0 = disabled

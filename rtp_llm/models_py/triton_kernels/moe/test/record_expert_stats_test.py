@@ -293,5 +293,69 @@ class Log2PhyDispatchTest(unittest.TestCase):
         )
 
 
+class RedundantLog2PhyTest(unittest.TestCase):
+    """redundant_expert>0: each logical expert has multiple physical replicas.
+
+    4 logical experts, 8 physical slots (2 replicas each), ep_size=2.
+    phy2log = [0,1,2,3, 0,1,2,3], so log2phy[l] = [l, l+4, -1,-1,-1].
+    """
+
+    def _mapping(self):
+        log2phy = torch.full((4, 5), -1, dtype=torch.int32)
+        for logical_id in range(4):
+            log2phy[logical_id, 0] = logical_id
+            log2phy[logical_id, 1] = logical_id + 4
+        logic_expert_cnt = torch.tensor([2, 2, 2, 2], dtype=torch.int32)
+        return log2phy, logic_expert_cnt
+
+    def test_dp_rank_offset_selects_different_replica(self):
+        log2phy, logic_expert_cnt = self._mapping()
+        logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+
+        # dp_rank=0 -> replica_slot = position % 2
+        phy_dp0 = logical_to_physical_experts(
+            logical_ids, log2phy, logic_expert_cnt, route_offset=0
+        )
+        self.assertTrue(
+            torch.equal(phy_dp0, torch.tensor([[0, 5], [2, 7]], dtype=torch.int32))
+        )
+
+        # dp_rank=1 -> replica_slot = (position + 1) % 2, different replicas
+        phy_dp1 = logical_to_physical_experts(
+            logical_ids, log2phy, logic_expert_cnt, route_offset=1
+        )
+        self.assertTrue(
+            torch.equal(phy_dp1, torch.tensor([[4, 1], [6, 3]], dtype=torch.int32))
+        )
+        self.assertFalse(torch.equal(phy_dp0, phy_dp1))
+
+    def test_stats_split_logical_heat_and_physical_load(self):
+        log2phy, logic_expert_cnt = self._mapping()
+        logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        physical_ids = logical_to_physical_experts(
+            logical_ids, log2phy, logic_expert_cnt, route_offset=0
+        )
+
+        ep_size, phy_exp_num = 2, 8
+        log_stats = torch.zeros(1, 4, dtype=torch.int32)
+        gpu_loads = torch.zeros(1, ep_size, dtype=torch.int32)
+        _record_expert_stats_torch(
+            logical_ids, physical_ids, log_stats, gpu_loads, 0, phy_exp_num
+        )
+
+        # logical heat: each of the 4 logical experts hit once
+        self.assertTrue(
+            torch.equal(log_stats, torch.tensor([[1, 1, 1, 1]], dtype=torch.int32))
+        )
+        # physical load: experts_per_rank = ceil_div(8,2)=4;
+        # physical [0,5,2,7] -> ranks [0,1,0,1]
+        self.assertTrue(
+            torch.equal(gpu_loads, torch.tensor([[2, 2]], dtype=torch.int32))
+        )
+        # invariant: sum(log_stats) == sum(gpu_loads) == tokens * top_k
+        self.assertEqual(int(log_stats.sum()), int(gpu_loads.sum()))
+        self.assertEqual(int(log_stats.sum()), logical_ids.numel())
+
+
 if __name__ == "__main__":
     unittest.main()

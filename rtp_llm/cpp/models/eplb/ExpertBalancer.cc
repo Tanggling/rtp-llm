@@ -207,6 +207,13 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     }
 
     resetPlan(true);
+
+    auto placement_env = autil::EnvUtil::getEnv("EPLB_PLACEMENT", std::string("eplb"));
+    circulant_mode_    = (placement_env == "circulant");
+    if (circulant_mode_) {
+        printf("[EPLB] circulant mode enabled: static plan will be batch-applied "
+               "to all MoE layers once, bypassing per-layer EPLB cycle\n");
+    }
 }
 
 ExpertBalancer::~ExpertBalancer() {}
@@ -410,6 +417,14 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
 }
 
 void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model) {
+    if (circulant_mode_) {
+        if (!circulant_applied_) {
+            applyCirculantAllLayers(model);
+            circulant_applied_ = true;
+        }
+        return;
+    }
+
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::EPLB, EplbMode::ALL)) {
         // accumulate in every state so increments produced while a plan is being
         // prepared/loaded are not lost
@@ -574,6 +589,51 @@ void ExpertBalancer::applyPlanWeights(ModelBase& model) {
     exchange_dense_weight(*balanced_layer.moe_down_weight, result.moe_weight_2, result.moe_scale_2);
     exchange_tensor_data(balanced_layer.log2phy, result.log2phy);
     exchange_tensor_data(balanced_layer.logic_expert_cnt, result.logic_expert_cnt);
+}
+
+void ExpertBalancer::applyCirculantAllLayers(ModelBase& model) {
+    printf("[EPLB] Circulant batch: applying static plan to all MoE layers...\n");
+    int64_t start_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+
+    auto moe_layer_ids = eplb_python_wrapper_.getMoeLayerIds();
+
+    for (int layer_id : moe_layer_ids) {
+        if (ep_rank_ == 0) {
+            eplb_python_wrapper_.createCirculantPlanForLayer(layer_id, eplb_plan_tensors_);
+            copyFromTensor(eplb_plan_tensors_.layer_id_buf, eplb_plan_buffers_.layer_id_buf);
+            copyFromTensor(eplb_plan_tensors_.logic_expert_cnt, eplb_plan_buffers_.logic_expert_cnt);
+            copyFromTensor(eplb_plan_tensors_.log2phy, eplb_plan_buffers_.log2phy);
+            copyFromTensor(eplb_plan_tensors_.phy2log, eplb_plan_buffers_.phy2log);
+        }
+
+        if (isCommOpsRegistered()) {
+            execBroadcast({{eplb_plan_buffers_.layer_id_buf,
+                            eplb_plan_buffers_.logic_expert_cnt,
+                            eplb_plan_buffers_.log2phy,
+                            eplb_plan_buffers_.phy2log},
+                           0,
+                           ParallelMode::DP_AND_TP});
+            copyToTensor(eplb_plan_buffers_.layer_id_buf, eplb_plan_tensors_.layer_id_buf);
+            copyToTensor(eplb_plan_buffers_.logic_expert_cnt, eplb_plan_tensors_.logic_expert_cnt);
+            copyToTensor(eplb_plan_buffers_.log2phy, eplb_plan_tensors_.log2phy);
+            copyToTensor(eplb_plan_buffers_.phy2log, eplb_plan_tensors_.phy2log);
+        }
+
+        loadPlanWeights();
+
+        processPlanWeights();
+        applyPlanWeights(model);
+
+        printf("[EPLB] Circulant batch: layer %d applied\n", layer_id);
+    }
+
+    if (isCommOpsRegistered()) {
+        auto barrier = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        execAllReduce({barrier, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    }
+
+    int64_t elapsed = autil::TimeUtility::currentTimeInMilliSeconds() - start_ms;
+    printf("[EPLB] Circulant batch: %zu layers applied in %ld ms\n", moe_layer_ids.size(), (long)elapsed);
 }
 
 bool ExpertBalancer::syncPlanWeightsLoadStatus() {

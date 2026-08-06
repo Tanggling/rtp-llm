@@ -172,7 +172,11 @@ def repack_experts(
     num_log = weight.shape[-1]
     assert weight.shape[0] == 1
 
-    redundant_weight = weight[0][phy2log[0]]
+    # A logical expert's work is divided across its replicas at dispatch time.
+    # Packing every replica with the full logical load over-counts an expert by
+    # its replica count and produces a topology optimized for the wrong loads.
+    replica_count = torch.bincount(phy2log[0], minlength=num_log).clamp_min(1)
+    redundant_weight = (weight[0] / replica_count)[phy2log[0]]
     redundant_weight.unsqueeze_(0)
     pack_index, rank_in_pack = balanced_packing(redundant_weight, num_gpus)
     phy_experts_per_gpu = num_replicas // num_gpus

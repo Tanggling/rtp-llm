@@ -48,4 +48,32 @@ void ExpertBalancerPythonWrapper::loadBalanceWeight(int ep_rank, int ep_size, Ep
     eplb_plan.moe_scale_2  = result_tuple[4].cast<torch::Tensor>();
 }
 
+std::vector<int> ExpertBalancerPythonWrapper::getMoeLayerIds() {
+    py::gil_scoped_acquire acquire;
+    py::list               ids = py_eplb_.attr("get_moe_layer_ids")();
+    std::vector<int>       result;
+    result.reserve(ids.size());
+    for (auto& id : ids) {
+        result.push_back(id.cast<int>());
+    }
+    return result;
+}
+
+void ExpertBalancerPythonWrapper::createCirculantPlanForLayer(int layer_id, EplbPlanTensors& eplb_plan) {
+    py::gil_scoped_acquire acquire;
+
+    auto res = py_eplb_.attr("create_circulant_plan_for_layer")(layer_id);
+
+    py::tuple result_tuple = res.cast<py::tuple>();
+
+    if (result_tuple.size() != 4) {
+        throw std::runtime_error("Expected 4 return values from create_circulant_plan_for_layer");
+    }
+
+    eplb_plan.layer_id_buf     = result_tuple[0].cast<torch::Tensor>();
+    eplb_plan.logic_expert_cnt = result_tuple[1].cast<torch::Tensor>();
+    eplb_plan.log2phy          = result_tuple[2].cast<torch::Tensor>();
+    eplb_plan.phy2log          = result_tuple[3].cast<torch::Tensor>();
+}
+
 }  // namespace rtp_llm
