@@ -27,6 +27,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
 from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
     record_function_range,
 )
+from rtp_llm.ops import PrefillCPConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -139,6 +140,7 @@ class Fp8Fp4MoeRuntimeConfig:
             local_rank=self.local_rank,
             world_size=self.world_size,
             ffn_disaggregate_config=None,
+            prefill_cp_config=PrefillCPConfig(),
         )
         self.moe_config = SimpleNamespace(
             moe_strategy=self.moe_strategy,
