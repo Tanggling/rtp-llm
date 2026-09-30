@@ -26,6 +26,13 @@ from .no_quant import (
 from .fp4 import (CudaFp4EpLowLatencyStrategy,
                   CudaFp4EpNormalStrategy,
                   CudaFp4NoDPStrategy)
+from .fp8_fp4 import (
+    CudaGroupedFp4Strategy,
+    CudaLocalLoopStrategy,
+    CudaMegaMoeSEStrategy,
+    CudaMegaMoeStrategy,
+)
+from .dsv4_fp8_fp4 import CudaDsv4DeepepFp8Fp4Strategy
 
 
 __all__ = [
@@ -50,5 +57,10 @@ __all__ = [
     "CudaW4a8Int4PerChannelNoDPStrategy",
     "CudaFp4EpLowLatencyStrategy",
     "CudaFp4EpNormalStrategy",
-    "CudaFp4NoDPStrategy"
+    "CudaFp4NoDPStrategy",
+    "CudaMegaMoeSEStrategy",
+    "CudaMegaMoeStrategy",
+    "CudaGroupedFp4Strategy",
+    "CudaLocalLoopStrategy",
+    "CudaDsv4DeepepFp8Fp4Strategy",
 ]

@@ -76,6 +76,11 @@ else:
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
+        CudaGroupedFp4Strategy,
+        CudaDsv4DeepepFp8Fp4Strategy,
+        CudaLocalLoopStrategy,
+        CudaMegaMoeSEStrategy,
+        CudaMegaMoeStrategy,
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
@@ -85,6 +90,11 @@ else:
     )
 
     registry = StrategyRegistry()
+    registry.register(CudaDsv4DeepepFp8Fp4Strategy())
+    registry.register(CudaMegaMoeSEStrategy())
+    registry.register(CudaMegaMoeStrategy())
+    registry.register(CudaGroupedFp4Strategy())
+    registry.register(CudaLocalLoopStrategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())
     registry.register(CudaFp8PerTensorEpNormalStrategy())
     registry.register(CudaFp8PerBlockEpLowLatencyStrategy())

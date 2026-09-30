@@ -55,8 +55,14 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "dspark_noise_token_id",
+        "dspark_target_layer_ids",
+        "dspark_markov_rank",
+        "dspark_sample_from_anchor",
+        "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
+        "enable_output_vocab_pruning",
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
@@ -67,7 +73,12 @@ class ModelConfig(CppModelConfig):
         "model_name",
         "quant_config",
         "inter_size",
+        "dense_inter_size",
         "moe_inter_size",
+        "moe_w1_layout",
+        "moe_prefill_max_tokens_per_rank",
+        "n_shared_experts",
+        "dsv4_fixed_pool_use_memory",
         "generate_env_config",
         "render_config",
         "phy2log_path",
@@ -538,10 +549,24 @@ class ModelConfig(CppModelConfig):
         self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
+        self.dspark_noise_token_id: Optional[int] = None
+        self.dspark_target_layer_ids: Optional[list[int]] = None
+        self.dspark_markov_rank: Optional[int] = None
+        self.dspark_sample_from_anchor: bool = True
+        self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
+        self.enable_output_vocab_pruning: bool = False
         self.inter_size: int = 0  # FFN intermediate size (for regular FFN layers)
+        self.dense_inter_size: int = 0
         self.moe_inter_size: int = (
             0  # MOE intermediate size (for MOE expert FFN layers)
         )
+        # DSV4 uses gate/up packed routed experts with FP8 activations and
+        # packed FP4 weights. Keep these fields Python-only so the integration
+        # does not alter the C++ configuration ABI used by other models.
+        self.moe_w1_layout: str = "up_gate"
+        self.n_shared_experts: int = 0
+        self.dsv4_fixed_pool_use_memory: Optional[bool] = None
+        self.moe_prefill_max_tokens_per_rank: Optional[int] = None
 
         # Renderer configuration fields
         self.generate_env_config: Optional[Any] = (

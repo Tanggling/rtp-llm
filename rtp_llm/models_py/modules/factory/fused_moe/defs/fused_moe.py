@@ -17,6 +17,18 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
 from rtp_llm.models_py.utils.phase_timer import get_phase_timer
 
 
+@dataclass(frozen=True)
+class ExpertGatePayload:
+    scores: torch.Tensor
+    topk: int
+    score_func: str
+    route_scale: float
+    norm_eps: float = 1.0e-12
+    bias: Optional[torch.Tensor] = None
+    input_ids: Optional[torch.Tensor] = None
+    tid2eid: Optional[torch.Tensor] = None
+
+
 @dataclass
 class ExpertTokensMetadata:
     """
@@ -41,6 +53,7 @@ class ExpertForwardPayload:
     expert_topk_ids: Optional[torch.Tensor] = None
     expert_topk_weights: Optional[torch.Tensor] = None
     expert_ids_are_local: bool = False
+    gate_payload: Optional[ExpertGatePayload] = None
 
 
 @dataclass
@@ -70,6 +83,10 @@ class FusedMoeDataRouter(ABC):
     @classmethod
     def router_type(cls) -> RouterType:
         raise NotImplementedError
+
+    @property
+    def supports_gate_pack(self) -> bool:
+        return False
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -144,6 +161,14 @@ class FusedMoeExpertExecutor(ABC):
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int64
 
+    @property
+    def supports_gate_pack(self) -> bool:
+        return False
+
+    @property
+    def includes_shared_expert(self) -> bool:
+        return False
+
     @abstractmethod
     def execute(
         self,
@@ -175,6 +200,22 @@ class FusedMoe(torch.nn.Module):
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return self.fused_experts.topk_ids_dtype
+
+    @property
+    def strategy_name(self) -> str:
+        return getattr(
+            self.fused_experts,
+            "strategy_name",
+            type(self.fused_experts).__name__,
+        )
+
+    @property
+    def includes_shared_expert(self) -> bool:
+        return bool(getattr(self.fused_experts, "includes_shared_expert", False))
+
+    @property
+    def supports_gate_pack(self) -> bool:
+        return False
 
     def forward(
         self,
