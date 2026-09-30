@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include <c10/core/ScalarType.h>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -55,6 +56,13 @@ struct AttentionConfigs {
     int  indexer_head_dim = 0;
     int  indexer_head_num = 0;
     int  indexer_topk     = 0;
+
+    // DeepSeek-V4 compressed-attention configuration.
+    std::vector<int> layer_compress_ratios;
+    size_t           o_groups            = 0;
+    size_t           o_lora_rank         = 0;
+    int              sliding_window      = 0;
+    double           compress_rope_theta = 0.0;
 
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
