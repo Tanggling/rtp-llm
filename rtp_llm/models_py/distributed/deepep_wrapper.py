@@ -24,6 +24,14 @@ except ImportError:
 
 from torch.distributed import ProcessGroup
 
+
+class DeepEPMode(IntEnum):
+    """The mode of deep_ep."""
+
+    NORMAL = auto()
+    LOW_LATENCY = auto()
+    LOW_LATENCY_M2N = auto()
+
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
@@ -55,14 +63,6 @@ def use_accl_ep() -> bool:
 def allow_mnnvl() -> bool:
     """Check if MNNVL is allowed based on architecture and GPU capability."""
     return "aarch64" in platform.machine() and is_sm10x()
-
-
-class DeepEPMode(IntEnum):
-    """The mode of deep_ep."""
-
-    NORMAL = auto()
-    LOW_LATENCY = auto()
-    LOW_LATENCY_M2N = auto()
 
 
 @dataclass
