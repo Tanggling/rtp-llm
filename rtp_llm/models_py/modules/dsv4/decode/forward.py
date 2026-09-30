@@ -59,6 +59,16 @@ _DSV4_DECODE_POOL_TAGS: Tuple[str, ...] = (
 )
 
 
+def _layer_owns_pool(compress_ratio: int, tag: str) -> bool:
+    if tag == SWA_KV:
+        return True
+    if compress_ratio == 4:
+        return tag in (CSA_KV, INDEXER_KV, CSA_STATE, INDEXER_STATE)
+    if compress_ratio == 128:
+        return tag in (HCA_KV, HCA_STATE)
+    return False
+
+
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
     """No-fallback accessor for the FULL pools' kernel tokens-per-block.
 
@@ -154,6 +164,8 @@ def build_paged_pool_specs(
         for tag in _DSV4_DECODE_POOL_TAGS:
             for layer in v4.layers:
                 attn = layer.attn
+                if not _layer_owns_pool(int(attn.compress_ratio), tag):
+                    continue
                 if id(attn) not in saved_kv:
                     saved_kv[id(attn)] = (attn, attn._kv_cache)
                     attn._kv_cache = kv_cache
