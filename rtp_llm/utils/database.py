@@ -13,6 +13,27 @@ from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 
 
+def _patch_fastsafetensors_ue8m0() -> None:
+    """Teach fastsafetensors 0.1.19 about the safetensors F8_E8M0 dtype."""
+    import fastsafetensors.st_types as st_types
+
+    dtype_cls = st_types.DType
+    if "F8_E8M0" not in dtype_cls.__members__:
+        member = object.__new__(dtype_cls)
+        member._name_ = "F8_E8M0"
+        member._value_ = "F8_E8M0"
+        dtype_cls._member_names_.append(member._name_)
+        dtype_cls._member_map_[member._name_] = member
+        dtype_cls._value2member_map_[member._value_] = member
+        type.__setattr__(dtype_cls, member._name_, member)
+
+    from fastsafetensors.frameworks import _torch as torch_framework
+
+    ue8m0 = dtype_cls.F8_E8M0
+    torch_framework.dtype_convert[ue8m0] = torch.float8_e8m0fnu
+    torch_framework.need_workaround_dtypes[ue8m0] = dtype_cls.U8
+
+
 class BaseDatabase:
 
     def get_pretrain_tensor_names(self) -> List[str]:
@@ -266,6 +287,7 @@ class CkptDatabase(BaseDatabase):
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
     ):
+        _patch_fastsafetensors_ue8m0()
         from fastsafetensors import ParallelLoader, SingleGroup
 
         from rtp_llm.model_loader.per_expert_parallel_loader import (
