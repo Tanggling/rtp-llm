@@ -36,6 +36,7 @@ class Group(Enum):
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
+_default_store = None  # Keep rank-0 TCPStore alive for NCCL heartbeat monitoring.
 
 
 def init_distributed_environment(
@@ -60,7 +61,7 @@ def init_distributed_environment(
     Raises:
         RuntimeError: If already initialized and not destroyed
     """
-    global _group_map, _parallelism_config, _initialized
+    global _group_map, _parallelism_config, _initialized, _default_store
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -116,6 +117,7 @@ def init_distributed_environment(
         # device_id=torch.device(f"cuda:{local_rank}"), # https://github.com/pytorch/pytorch/pull/149144
         timeout=infinite_timeout,
     )
+    _default_store = torch.distributed.distributed_c10d._get_default_store()
     torch.distributed.barrier(group=torch.distributed.group.WORLD)
     _group_map[Group.DP_AND_TP] = torch.distributed.group.WORLD
     logging.info(
