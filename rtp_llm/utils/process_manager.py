@@ -158,6 +158,13 @@ class ProcessManager:
 
         logging.info(f"Monitoring {len(self.processes)} processes")
         self._monitor_processes_health()
+        for proc in self.processes:
+            logging.info(
+                "Managed process exited: name=%s pid=%s exitcode=%s",
+                proc.name,
+                proc.pid,
+                proc.exitcode,
+            )
         self._join_all_processes()
         logging.info("Process monitoring completed")
 
