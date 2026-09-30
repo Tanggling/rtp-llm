@@ -45,6 +45,7 @@ def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
     ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=0).contiguous()
@@ -1712,3 +1713,9 @@ class WeightStyle(Enum):
 
 FP8_E4M3_MAX = 448.0
 FP8_E4M3_MIN = -352.0
+
+
+def is_v4_weight(src_weight_info) -> bool:
+    """Return whether a weight descriptor belongs to the DeepSeek-V4 namespace."""
+    name = getattr(src_weight_info, "name", None)
+    return isinstance(name, str) and name.startswith("v4.")
