@@ -307,13 +307,15 @@ class CkptDatabase(BaseDatabase):
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
 
+            use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
             loader_kwargs: Dict[str, Any] = dict(
                 pg=pg,
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=True,
+                use_shm=not use_nogds,
+                nogds=use_nogds,
             )
             if stacked_key_config:
                 loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
