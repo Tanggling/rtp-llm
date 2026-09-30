@@ -59,6 +59,14 @@ std::vector<int> ExpertBalancerPythonWrapper::getMoeLayerIds() {
     return result;
 }
 
+bool ExpertBalancerPythonWrapper::isCirculantPreloaded() {
+    py::gil_scoped_acquire acquire;
+    if (py_eplb_.is_none() || !py::hasattr(py_eplb_, "is_circulant_preloaded")) {
+        return false;
+    }
+    return py_eplb_.attr("is_circulant_preloaded")().cast<bool>();
+}
+
 void ExpertBalancerPythonWrapper::createCirculantPlanForLayer(int layer_id, EplbPlanTensors& eplb_plan) {
     py::gil_scoped_acquire acquire;
 

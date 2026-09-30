@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0
 
 import logging
+import os
 
 import torch
 import triton
@@ -1191,6 +1192,8 @@ def wf_k_dispatch(
 # ---------------------------------------------------------------------------
 
 _wf_dispatch_use_triton = True
+# tl.histogram lands in triton 3.x; older/vendor triton keeps the atomic path.
+_wf_count_use_histogram = hasattr(tl, "histogram")
 
 
 @triton.jit
@@ -1211,6 +1214,158 @@ def _wf_count_kernel(
 
 
 @triton.jit
+def _wf_count_hist_kernel(
+    topk_ids_ptr,
+    counts_ptr,
+    num_logical,
+    numel,
+    BLOCK_SIZE: tl.constexpr,
+    NBINS: tl.constexpr,
+):
+    """Same result as _wf_count_kernel, one vector atomic per block instead of one
+    scalar atomic per id.
+
+    _wf_count_kernel issues ``numel`` atomic_adds into only ``num_logical``
+    addresses (256 at production scale), and triton does not warp-aggregate
+    same-address atomics -- at 3.7M ids that serialization, not bandwidth,
+    dominates the whole dispatch. Histogramming in registers first turns it into
+    NBINS atomics per block.
+
+    Bin ``num_logical`` is a dedicated overflow bin for -1 sentinels, out-of-range
+    ids and masked tail lanes. It must exist (hence NBINS > num_logical): triton's
+    histogram folds indices >= num_bins into bin 0 rather than dropping them, so
+    parking invalid lanes past the end would corrupt logical expert 0.
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+    e = tl.load(topk_ids_ptr + offs, mask=mask, other=-1).to(tl.int32)
+    valid = mask & (e >= 0) & (e < num_logical)
+    hist = tl.histogram(tl.where(valid, e, num_logical), NBINS)
+    bins = tl.arange(0, NBINS)
+    tl.atomic_add(counts_ptr + bins, hist.to(tl.float32), mask=bins < num_logical)
+
+
+@triton.jit
+def _wf_prep_kernel(
+    log2phy_ptr,
+    logic_expert_cnt_ptr,
+    cand_phys_ptr,
+    cand_gpu_ptr,
+    rep_count_ptr,
+    num_logical,
+    stride_e,
+    stride_k,
+    experts_per_gpu,
+    BLOCK_E: tl.constexpr,
+    HAS_SECOND: tl.constexpr,
+):
+    """Derive the compact [E, 2] candidate tables from the live placement.
+
+    One program, one launch: replaces the slice/contiguous, ge, full_like,
+    floordiv, where and clamp torch ops, whose launch overhead is pure latency at
+    E <= 1024.
+
+    ``HAS_SECOND`` is False when ``log2phy`` has a single column (pad_k == 1, i.e.
+    no redundant experts): there is no second replica to read, and everything
+    falls through the k == 1 branch of _fill2 / _round2.
+    """
+    offs = tl.arange(0, BLOCK_E)
+    m = offs < num_logical
+    p0 = tl.load(log2phy_ptr + offs * stride_e, mask=m, other=-1).to(tl.int32)
+    if HAS_SECOND:
+        p1 = tl.load(log2phy_ptr + offs * stride_e + stride_k, mask=m, other=-1).to(
+            tl.int32
+        )
+    else:
+        p1 = tl.full([BLOCK_E], -1, tl.int32)
+    k = tl.load(logic_expert_cnt_ptr + offs, mask=m, other=1).to(tl.int32)
+    tl.store(cand_phys_ptr + offs * 2 + 0, p0, mask=m)
+    tl.store(cand_phys_ptr + offs * 2 + 1, p1, mask=m)
+    tl.store(
+        cand_gpu_ptr + offs * 2 + 0,
+        tl.where(p0 >= 0, p0 // experts_per_gpu, -1),
+        mask=m,
+    )
+    tl.store(
+        cand_gpu_ptr + offs * 2 + 1,
+        tl.where(p1 >= 0, p1 // experts_per_gpu, -1),
+        mask=m,
+    )
+    # k == 2 only when a second replica really exists, so an inconsistent
+    # logic_expert_cnt can never make the water-fill pour into a -1 slot.
+    tl.store(rep_count_ptr + offs, tl.where(p1 >= 0, tl.minimum(k, 2), 1), mask=m)
+
+
+@triton.jit
+def _fill2(c, k, s0, s1):
+    """Closed-form 2-way water-fill: pour ``c`` into replicas at loads s0,s1.
+
+    Returns fractional allocation (a0, a1) in candidate order. For a single
+    replica (k==1) all of ``c`` lands on replica 0.
+    """
+    gap = tl.abs(s0 - s1)
+    level = (s0 + s1 + c) * 0.5
+    two_a0 = tl.where(s0 <= s1, tl.minimum(c, gap), 0.0)
+    two_a1 = tl.where(s0 <= s1, 0.0, tl.minimum(c, gap))
+    split0 = level - s0
+    split1 = level - s1
+    use_split = c > gap
+    a0_2 = tl.where(use_split, split0, two_a0)
+    a1_2 = tl.where(use_split, split1, two_a1)
+    a0 = tl.where(k == 2, a0_2, c)
+    a1 = tl.where(k == 2, a1_2, 0.0)
+    return a0, a1
+
+
+@triton.jit
+def _snap2(c, k, a0, a1, TILE: tl.constexpr):
+    """Align the 2-way split point to a multiple of the grouped-GEMM tile.
+
+    ``TILE == 0`` disables this and returns ``_fill2``'s allocation unchanged.
+
+    Tile padding is charged on the row count of a physical slot summed over all
+    source ranks, while this kernel only sees one rank's demand -- so a slot
+    costs a tile if ANY rank routes anything there. The lever is cross-rank
+    AGREEMENT on which replica the small experts use, and agreement here is
+    free because the rule is (almost) input-independent: a rank's median demand
+    for one expert is well under one tile, so ``a0 ~ c/2`` always rounds the
+    same way on every rank without exchanging a byte. Balance survives because
+    each snap freezes at most one tile of demand, and the coordinate-descent
+    passes still have most of the mass to level with -- which makes
+    MAX_PASSES > 1 (policy wf_iter) part of the design, not an option.
+    """
+    if TILE == 0:
+        return a0, a1
+    # Round-half-up; the tie direction is immaterial (measured offline).
+    q = tl.floor(a0 / TILE + 0.5) * TILE
+    q = tl.minimum(tl.maximum(q, 0.0), c)
+    return tl.where(k == 2, q, a0), tl.where(k == 2, c - q, a1)
+
+
+@triton.jit
+def _round2(c, k, a0, a1):
+    """Largest-remainder integer rounding of (a0,a1) summing to int(c)."""
+    ci = (c + 0.5).to(tl.int32)
+    f0 = tl.floor(a0)
+    f1 = tl.floor(a1)
+    i0 = f0.to(tl.int32)
+    i1 = f1.to(tl.int32)
+    rem = ci - i0 - i1
+    # rem is 0 or 1; award it to the larger fractional part, ties -> replica 0.
+    frac0 = a0 - f0
+    frac1 = a1 - f1
+    give0 = (rem == 1) & (frac0 >= frac1)
+    give1 = (rem == 1) & (frac1 > frac0)
+    q0 = i0 + give0.to(tl.int32)
+    q1 = i1 + give1.to(tl.int32)
+    # k==1: everything on replica 0.
+    q0 = tl.where(k == 2, q0, ci)
+    q1 = tl.where(k == 2, q1, 0)
+    return q0, q1
+
+
+@triton.jit
 def _wf_quota_kernel(
     counts_ptr,
     hot_order_ptr,
@@ -1221,10 +1376,14 @@ def _wf_quota_kernel(
     num_logical,
     MAX_PASSES: tl.constexpr,
     BLOCK_G: tl.constexpr,
+    TILE_M: tl.constexpr,
 ):
+    # Single program instance. recv[G] lives in registers across the whole
+    # sequential scan; G is tiny (<= 8) so BLOCK_G lanes cover it.
     idx = tl.arange(0, BLOCK_G)
     recv = tl.zeros([BLOCK_G], dtype=tl.float32)
 
+    # ---- Pass 0: hot-first single fill (this alone is policy "wf"). ----
     for i in range(num_logical):
         e = tl.load(hot_order_ptr + i)
         c = tl.load(counts_ptr + e)
@@ -1233,39 +1392,19 @@ def _wf_quota_kernel(
         g1 = tl.load(cand_gpu_ptr + e * 2 + 1)
         s0 = tl.sum(tl.where(idx == g0, recv, 0.0))
         s1 = tl.sum(tl.where(idx == g1, recv, 0.0))
-        # _fill2: closed-form 2-way water-fill
-        gap = tl.abs(s0 - s1)
-        level = (s0 + s1 + c) * 0.5
-        two_a0 = tl.where(s0 <= s1, tl.minimum(c, gap), 0.0)
-        two_a1 = tl.where(s0 <= s1, 0.0, tl.minimum(c, gap))
-        split0 = level - s0
-        split1 = level - s1
-        use_split = c > gap
-        a0_2 = tl.where(use_split, split0, two_a0)
-        a1_2 = tl.where(use_split, split1, two_a1)
-        a0 = tl.where(k == 2, a0_2, c)
-        a1 = tl.where(k == 2, a1_2, 0.0)
+        a0, a1 = _fill2(c, k, s0, s1)
+        # Snap BEFORE folding into recv, so later experts water-fill against the
+        # allocation that will actually happen rather than a discarded fraction.
+        a0, a1 = _snap2(c, k, a0, a1, TILE_M)
         recv = recv + tl.where(idx == g0, a0, 0.0) + tl.where(idx == g1, a1, 0.0)
-        # _round2: largest-remainder integer rounding
-        ci = (c + 0.5).to(tl.int32)
-        f0 = tl.floor(a0)
-        f1 = tl.floor(a1)
-        i0 = f0.to(tl.int32)
-        i1 = f1.to(tl.int32)
-        rem = ci - i0 - i1
-        frac0 = a0 - f0
-        frac1 = a1 - f1
-        give0 = (rem == 1) & (frac0 >= frac1)
-        give1 = (rem == 1) & (frac1 > frac0)
-        q0 = i0 + give0.to(tl.int32)
-        q1 = i1 + give1.to(tl.int32)
-        q0 = tl.where(k == 2, q0, ci)
-        q1 = tl.where(k == 2, q1, 0)
+        q0, q1 = _round2(c, k, a0, a1)
         tl.store(quota_ptr + e * 2 + 0, q0)
         tl.store(quota_ptr + e * 2 + 1, q1)
         tl.store(alloc_ptr + e * 2 + 0, a0)
         tl.store(alloc_ptr + e * 2 + 1, a1)
 
+    # ---- Passes 1..: coordinate descent (policy "wf_iter"). Only 2-replica
+    # experts move; remove their old alloc, re-fill against the current recv. --
     for _p in range(MAX_PASSES - 1):
         for i in range(num_logical):
             e = tl.load(hot_order_ptr + i)
@@ -1282,34 +1421,12 @@ def _wf_quota_kernel(
                 )
                 s0 = tl.sum(tl.where(idx == g0, recv, 0.0))
                 s1 = tl.sum(tl.where(idx == g1, recv, 0.0))
-                gap = tl.abs(s0 - s1)
-                level = (s0 + s1 + c) * 0.5
-                two_a0 = tl.where(s0 <= s1, tl.minimum(c, gap), 0.0)
-                two_a1 = tl.where(s0 <= s1, 0.0, tl.minimum(c, gap))
-                split0 = level - s0
-                split1 = level - s1
-                use_split = c > gap
-                a0_2 = tl.where(use_split, split0, two_a0)
-                a1_2 = tl.where(use_split, split1, two_a1)
-                a0 = tl.where(k == 2, a0_2, c)
-                a1 = tl.where(k == 2, a1_2, 0.0)
+                a0, a1 = _fill2(c, k, s0, s1)
+                a0, a1 = _snap2(c, k, a0, a1, TILE_M)
                 recv = (
                     recv + tl.where(idx == g0, a0, 0.0) + tl.where(idx == g1, a1, 0.0)
                 )
-                ci = (c + 0.5).to(tl.int32)
-                f0 = tl.floor(a0)
-                f1 = tl.floor(a1)
-                i0 = f0.to(tl.int32)
-                i1 = f1.to(tl.int32)
-                rem = ci - i0 - i1
-                frac0 = a0 - f0
-                frac1 = a1 - f1
-                give0 = (rem == 1) & (frac0 >= frac1)
-                give1 = (rem == 1) & (frac1 > frac0)
-                q0 = i0 + give0.to(tl.int32)
-                q1 = i1 + give1.to(tl.int32)
-                q0 = tl.where(k == 2, q0, ci)
-                q1 = tl.where(k == 2, q1, 0)
+                q0, q1 = _round2(c, k, a0, a1)
                 tl.store(quota_ptr + e * 2 + 0, q0)
                 tl.store(quota_ptr + e * 2 + 1, q1)
                 tl.store(alloc_ptr + e * 2 + 0, a0)
@@ -1345,6 +1462,15 @@ def _wf_scatter_kernel(
 # ---- torch fallback (PPU without triton compilation) ----
 
 
+def _wf_snap2_cpu(c: float, k: int, a0: float, a1: float, tile: int):
+    """CPU mirror of the triton _snap2: align the split point to the GEMM tile."""
+    if tile <= 0 or k != 2:
+        return a0, a1
+    q = float(int(a0 / tile + 0.5)) * tile
+    q = min(max(q, 0.0), c)
+    return q, c - q
+
+
 def _wf_dispatch_torch(
     flat_ids: torch.Tensor,
     counts: torch.Tensor,
@@ -1356,18 +1482,20 @@ def _wf_dispatch_torch(
     num_logical: int,
     numel: int,
     max_passes: int,
+    tile_m: int = 0,
 ) -> torch.Tensor:
     """Pure-torch WF dispatch fallback (CPU waterfill, GPU scatter)."""
     import numpy as np
 
     device = flat_ids.device
 
-    # count on GPU → CPU
-    counts.zero_()
-    counts.scatter_add_(
-        0,
-        flat_ids.long().clamp(0, num_logical - 1),
-        torch.ones(numel, dtype=torch.float32, device=device),
+    # count on GPU → CPU. Invalid ids (-1 padding, out of range) must not be
+    # counted: clamping them into expert 0 inflates its demand and shifts the
+    # whole water-fill away from the triton path's answer.
+    ids64 = flat_ids.long()
+    id_valid = (ids64 >= 0) & (ids64 < num_logical)
+    counts.copy_(
+        torch.bincount(ids64[id_valid], minlength=num_logical).to(torch.float32)
     )
     counts_cpu = counts.cpu().numpy().astype(np.float64)
 
@@ -1404,6 +1532,8 @@ def _wf_dispatch_torch(
         else:
             a0 = c
             a1 = 0.0
+        # Snap BEFORE folding into recv (same order as the triton kernel).
+        a0, a1 = _wf_snap2_cpu(c, k, a0, a1, tile_m)
         if g0 >= 0:
             recv[g0] += a0
         if g1 >= 0:
@@ -1453,6 +1583,7 @@ def _wf_dispatch_torch(
             else:
                 a0 = 0.0
                 a1 = min(c, gap)
+            a0, a1 = _wf_snap2_cpu(c, k, a0, a1, tile_m)
             if g0 >= 0:
                 recv[g0] += a0
             if g1 >= 0:
@@ -1472,43 +1603,173 @@ def _wf_dispatch_torch(
 
     quota.copy_(torch.from_numpy(quota_cpu).to(device))
 
-    # scatter on GPU (sort-based, deterministic)
-    sorted_ids, sort_idx = torch.sort(flat_ids.long())
-    seg_counts = torch.zeros(num_logical, dtype=torch.int64, device=device)
-    seg_counts.scatter_add_(
-        0,
-        sorted_ids.clamp(0, num_logical - 1),
-        torch.ones(numel, dtype=torch.int64, device=device),
-    )
+    # scatter on GPU (sort-based, deterministic). Invalid ids are keyed into a
+    # bucket past the table so they neither consume quota nor pick up a replica;
+    # they come back out as -1, matching the triton scatter.
+    keys = torch.where(id_valid, ids64, torch.full_like(ids64, num_logical))
+    sorted_ids, sort_idx = torch.sort(keys)
+    seg_counts = torch.bincount(sorted_ids, minlength=num_logical + 1)
     starts = torch.cat(
         [torch.zeros(1, dtype=torch.int64, device=device), seg_counts.cumsum(0)[:-1]]
     )
     positions = torch.arange(numel, device=device, dtype=torch.int64)
-    ranks = positions - starts[sorted_ids.clamp(0, num_logical - 1)]
-    q0 = quota[sorted_ids.clamp(0, num_logical - 1).int(), 0].long()
-    p0 = cand_phys[sorted_ids.clamp(0, num_logical - 1).int(), 0].long()
-    p1 = cand_phys[sorted_ids.clamp(0, num_logical - 1).int(), 1].long()
+    ranks = positions - starts[sorted_ids]
+    safe = sorted_ids.clamp(max=num_logical - 1).int()
+    q0 = quota[safe, 0].long()
+    p0 = cand_phys[safe, 0].long()
+    p1 = cand_phys[safe, 1].long()
     phys = torch.where(ranks < q0, p0, p1)
-    out = torch.empty(numel, dtype=torch.int32, device=device)
-    out[sort_idx] = phys.int()
+    phys = torch.where(sorted_ids < num_logical, phys, torch.full_like(phys, -1))
+    out = torch.empty(numel, dtype=flat_ids.dtype, device=device)
+    out[sort_idx] = phys.to(flat_ids.dtype)
     return out
 
 
-# ---- persistent scratch (module-level, lazy init per device) ----
+# ---- persistent dispatcher (mirrors vLLM expander's ExpanderDispatcher) ----
 
-_wf_scratch = {}
+# Grouped-GEMM tile alignment of the WF split point (_snap2). 0 = off.
+# Default 128 matches the expert-alignment tile used by the EP executors
+# (ep_scatter BLOCK_E / DeepEP expert_alignment).
+_WF_TILE_M = max(0, int(os.environ.get("EPLB_WF_TILE_M", "128") or 0))
+# Coordinate-descent passes for policy "wf_iter" (convergence sweep knob).
+_WF_ITER_PASSES = max(1, int(os.environ.get("EPLB_WF_ITER_PASSES", "8")))
 
 
-def _get_wf_scratch(num_logical: int, num_gpus: int, device: torch.device):
+class WfDispatcher:
+    """Persistent per-layer scratch and placement-derived candidate tables.
+
+    Static circulant placement reuses ``cand_phys`` / ``cand_gpu`` / ``rep_count``
+    until the source tensors' in-place version changes. The version check matters
+    during startup: C++ applies the one-time circulant plan after the first model
+    forward, so blindly freezing the first mapping would cache the loader layout.
+    Dynamic EPLB callers do not use the cache and refill candidates every call.
+    """
+
+    def __init__(self, num_logical: int, num_gpus: int, device: torch.device):
+        self.num_logical = num_logical
+        self.num_gpus = num_gpus
+        self.device = torch.device(device)
+        self.counts = torch.zeros(num_logical, dtype=torch.float32, device=device)
+        self.quota = torch.empty((num_logical, 2), dtype=torch.int32, device=device)
+        self.alloc = torch.empty((num_logical, 2), dtype=torch.float32, device=device)
+        self.rank_counter = torch.zeros(num_logical, dtype=torch.int32, device=device)
+        self.cand_phys = torch.empty((num_logical, 2), dtype=torch.int32, device=device)
+        self.cand_gpu = torch.empty((num_logical, 2), dtype=torch.int32, device=device)
+        self.rep_count = torch.empty(num_logical, dtype=torch.int32, device=device)
+        self._candidate_key = None
+
+    @staticmethod
+    def _revision(tensor: torch.Tensor) -> int:
+        # Model weights are materialised under torch.inference_mode(), and
+        # inference tensors carry no version counter at all. Such a tensor can
+        # only be revised in place from inside inference mode, which would not
+        # bump a counter either, so no cheap revision probe exists for it: the
+        # caller must not rely on this key to notice a mutating placement.
+        # Static placement is the only caller that does, and it is enabled only
+        # once the plan is final (see GenericMoeLayer._static_wf_placement).
+        try:
+            return tensor._version
+        except RuntimeError:
+            return -1
+
+    @classmethod
+    def candidate_key(cls, log2phy: torch.Tensor, logic_expert_cnt: torch.Tensor):
+        return (
+            log2phy.data_ptr(),
+            cls._revision(log2phy),
+            logic_expert_cnt.data_ptr(),
+            cls._revision(logic_expert_cnt),
+        )
+
+    def candidates_match(
+        self, log2phy: torch.Tensor, logic_expert_cnt: torch.Tensor
+    ) -> bool:
+        return self._candidate_key == self.candidate_key(log2phy, logic_expert_cnt)
+
+    def mark_candidates_current(
+        self, log2phy: torch.Tensor, logic_expert_cnt: torch.Tensor
+    ) -> None:
+        self._candidate_key = self.candidate_key(log2phy, logic_expert_cnt)
+
+    def prepare_candidates(
+        self,
+        log2phy: torch.Tensor,
+        logic_expert_cnt: torch.Tensor,
+        experts_per_gpu: int,
+    ) -> None:
+        if _wf_dispatch_use_triton:
+            try:
+                _wf_prepare_candidates_triton(
+                    self, log2phy, logic_expert_cnt, experts_per_gpu
+                )
+                self.mark_candidates_current(log2phy, logic_expert_cnt)
+                return
+            except Exception:
+                logger.warning(
+                    "triton WF candidate preparation unavailable, falling back to torch",
+                    exc_info=True,
+                )
+        _wf_prepare_candidates_torch(
+            self, log2phy, logic_expert_cnt, experts_per_gpu
+        )
+        self.mark_candidates_current(log2phy, logic_expert_cnt)
+
+
+_wf_dispatchers: dict = {}
+
+
+def _get_wf_dispatcher(num_logical: int, num_gpus: int, device: torch.device):
     key = (num_logical, num_gpus, str(device))
-    if key not in _wf_scratch:
-        _wf_scratch[key] = {
-            "counts": torch.zeros(num_logical, dtype=torch.float32, device=device),
-            "quota": torch.empty((num_logical, 2), dtype=torch.int32, device=device),
-            "alloc": torch.empty((num_logical, 2), dtype=torch.float32, device=device),
-            "rank_counter": torch.zeros(num_logical, dtype=torch.int32, device=device),
-        }
-    return _wf_scratch[key]
+    disp = _wf_dispatchers.get(key)
+    if disp is None:
+        disp = WfDispatcher(num_logical, num_gpus, device)
+        _wf_dispatchers[key] = disp
+    return disp
+
+
+def _wf_prepare_candidates_triton(
+    disp: WfDispatcher,
+    log2phy: torch.Tensor,
+    logic_expert_cnt: torch.Tensor,
+    experts_per_gpu: int,
+) -> None:
+    E = disp.num_logical
+    _wf_prep_kernel[(1,)](
+        log2phy,
+        logic_expert_cnt,
+        disp.cand_phys,
+        disp.cand_gpu,
+        disp.rep_count,
+        E,
+        log2phy.stride(0),
+        log2phy.stride(1),
+        experts_per_gpu,
+        BLOCK_E=triton.next_power_of_2(E),
+        HAS_SECOND=log2phy.shape[1] >= 2,
+    )
+
+
+def _wf_prepare_candidates_torch(
+    disp: WfDispatcher,
+    log2phy: torch.Tensor,
+    logic_expert_cnt: torch.Tensor,
+    experts_per_gpu: int,
+) -> None:
+    cand_phys = disp.cand_phys
+    cand_phys[:, 0] = log2phy[:, 0]
+    cand_phys[:, 1] = log2phy[:, 1] if log2phy.shape[1] >= 2 else -1
+    disp.cand_gpu.copy_(
+        torch.where(
+            cand_phys >= 0, cand_phys // experts_per_gpu, torch.full_like(cand_phys, -1)
+        )
+    )
+    disp.rep_count.copy_(
+        torch.where(
+            cand_phys[:, 1] >= 0,
+            logic_expert_cnt.clamp(max=2).to(disp.rep_count.dtype),
+            torch.ones_like(disp.rep_count),
+        )
+    )
 
 
 def wf_dispatch(
@@ -1518,6 +1779,9 @@ def wf_dispatch(
     num_gpus: int,
     num_physical: int,
     policy: str = "iter",
+    tile_m: int = None,
+    dispatcher: WfDispatcher = None,
+    static_placement: bool = False,
 ) -> torch.Tensor:
     """GPU-side water-filling dispatch (per-forward, per-layer).
 
@@ -1530,50 +1794,87 @@ def wf_dispatch(
         logic_expert_cnt: [E] int32, actual replica counts.
         num_gpus: EP size (G).
         num_physical: total physical experts (phy_exp_num).
-        policy: "wf" (1 pass) or "wf_iter" (8 passes coordinate descent).
+        policy: "wf" (1 pass) or "wf_iter" (EPLB_WF_ITER_PASSES coordinate
+            descent passes, default 8).
+        tile_m: grouped-GEMM tile alignment for the split point (_snap2).
+            None -> env EPLB_WF_TILE_M (default 128); 0 disables.
+        dispatcher: optional per-layer scratch owner. Required to retain static
+            candidate tables without sharing placement contents across layers.
+        static_placement: reuse candidate tables while the source placement
+            tensors' in-place versions are unchanged. The startup circulant
+            update invalidates the first cached mapping automatically.
 
     Returns:
-        [num_tokens, top_k] physical expert ids.
+        [num_tokens, top_k] physical expert ids, in ``topk_ids.dtype``.
     """
     global _wf_dispatch_use_triton
 
     device = topk_ids.device
     E = log2phy.shape[0]
-    experts_per_gpu = num_physical // num_gpus if num_gpus > 0 else 1
-    # cand_phys: [E, 2] first two replicas (-1 pad)
-    cand_phys = log2phy[:, :2].contiguous()
-    # cand_gpu: [E, 2] GPU id per replica (phys // experts_per_gpu)
-    cand_gpu = torch.where(
-        cand_phys >= 0,
-        cand_phys // experts_per_gpu,
-        torch.full_like(cand_phys, -1),
-    ).to(torch.int32)
-    rep_count = logic_expert_cnt.clamp(max=2).to(torch.int32)
+    experts_per_gpu = max(1, num_physical // num_gpus if num_gpus > 0 else 1)
 
-    flat = topk_ids.reshape(-1).to(torch.int32)
+    # No dtype copy: the count/scatter kernels cast in-kernel, so int64 topk_ids
+    # (the fused_moe default) stays a view.
+    flat = topk_ids.reshape(-1)
+    if not flat.is_contiguous():
+        flat = flat.contiguous()
     numel = flat.numel()
     if numel == 0:
         return topk_ids
 
-    scratch = _get_wf_scratch(E, num_gpus, device)
-    counts = scratch["counts"]
-    quota = scratch["quota"]
-    alloc = scratch["alloc"]
-    rank_counter = scratch["rank_counter"]
-    max_passes = 1 if policy == "wf" else 8
+    if static_placement and dispatcher is None:
+        raise ValueError("static placement requires a per-layer dispatcher")
+    disp = dispatcher or _get_wf_dispatcher(E, num_gpus, device)
+    if (
+        disp.num_logical != E
+        or disp.num_gpus != num_gpus
+        or disp.device != torch.device(device)
+    ):
+        raise ValueError("dispatcher shape/device does not match wf_dispatch inputs")
+    counts = disp.counts
+    quota = disp.quota
+    alloc = disp.alloc
+    rank_counter = disp.rank_counter
+    cand_phys = disp.cand_phys
+    cand_gpu = disp.cand_gpu
+    rep_count = disp.rep_count
+    max_passes = 1 if policy == "wf" else _WF_ITER_PASSES
+    tile = _WF_TILE_M if tile_m is None else tile_m
 
+    candidates_current = static_placement and disp.candidates_match(
+        log2phy, logic_expert_cnt
+    )
     if _wf_dispatch_use_triton:
         try:
+            if not candidates_current:
+                _wf_prepare_candidates_triton(
+                    disp, log2phy, logic_expert_cnt, experts_per_gpu
+                )
+                # Record immediately after enqueueing prep: every following op is
+                # on the same stream, and an async CUDA failure is surfaced by the
+                # normal execution error path rather than silently reusing output.
+                if static_placement:
+                    disp.mark_candidates_current(log2phy, logic_expert_cnt)
             counts.zero_()
             BLOCK_SIZE = min(1024, triton.next_power_of_2(numel))
             grid = (ceil_div(numel, BLOCK_SIZE),)
-            _wf_count_kernel[grid](
-                flat,
-                counts,
-                E,
-                numel,
-                BLOCK_SIZE=BLOCK_SIZE,
-            )
+            if _wf_count_use_histogram:
+                _wf_count_hist_kernel[grid](
+                    flat,
+                    counts,
+                    E,
+                    numel,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    NBINS=triton.next_power_of_2(E + 1),
+                )
+            else:
+                _wf_count_kernel[grid](
+                    flat,
+                    counts,
+                    E,
+                    numel,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                )
             hot_order = torch.argsort(counts, descending=True, stable=True)
             block_g = max(1, triton.next_power_of_2(num_gpus))
             _wf_quota_kernel[(1,)](
@@ -1586,9 +1887,13 @@ def wf_dispatch(
                 E,
                 MAX_PASSES=max_passes,
                 BLOCK_G=block_g,
+                TILE_M=tile,
             )
             rank_counter.zero_()
-            out_flat = torch.empty(numel, dtype=torch.int32, device=device)
+            # Caller's dtype: the scatter writes final ids directly, no trailing
+            # cast, and the return matches logical_to_physical_experts /
+            # wf_k_dispatch (and what generic_moe allocated topk_ids as).
+            out_flat = torch.empty(numel, dtype=topk_ids.dtype, device=device)
             _wf_scatter_kernel[grid](
                 flat,
                 quota,
@@ -1607,7 +1912,12 @@ def wf_dispatch(
                 exc_info=True,
             )
 
-    # torch fallback
+    # If triton setup failed before candidates became current, rebuild with
+    # torch. Otherwise reuse a current static table; dynamic placement refreshes.
+    if not (static_placement and disp.candidates_match(log2phy, logic_expert_cnt)):
+        _wf_prepare_candidates_torch(disp, log2phy, logic_expert_cnt, experts_per_gpu)
+        if static_placement:
+            disp.mark_candidates_current(log2phy, logic_expert_cnt)
     out_flat = _wf_dispatch_torch(
         flat,
         counts,
@@ -1619,5 +1929,6 @@ def wf_dispatch(
         E,
         numel,
         max_passes,
+        tile_m=tile,
     )
     return out_flat.view_as(topk_ids)

@@ -24,6 +24,16 @@ py_test(
 )
 
 py_test(
+    name = "wf_dispatch_test",
+    srcs = ["wf_dispatch_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ] + [":triton", ":torch"],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "test_ep_scatter",
     srcs = ["test_ep_scatter.py"],
     deps = [

@@ -100,6 +100,11 @@ class Qwen3NextBase(BaseModel):
         config.expert_num = config_json["num_experts"]
         config.moe_inter_size = config_json["moe_intermediate_size"]
         config.inter_size = config_json["shared_expert_intermediate_size"]
+        # Keep loader/runtime EPLB dimensions explicit. Qwen3.5 does not expose
+        # grouped routing in its HF config, so it uses the same single group as
+        # ModelConfig's historical default rather than leaving simulator parity
+        # to an implicit pybind default.
+        config.moe_n_group = config_json.get("n_group", 1)
         config.has_moe_norm = config_json.get("norm_topk_prob", True)  # 默认 True
         config.moe_style = 2  # shared + expert
 

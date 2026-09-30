@@ -51,6 +51,7 @@ class ModelLoader:
         self._task_type = model_config.task_type
         self._load_method = load_method
         self._weights_info = weights_info
+        self._database = database
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         if self._misc_weights_info is None:
             self._misc_weights_info = []
@@ -761,6 +762,13 @@ class ModelLoader:
 
         # static expert placement info
         phy2log_path = self.model_config.phy2log_path
+        placement_policy = os.environ.get("EPLB_PLACEMENT", "eplb")
+        # FT-style checkpoints are already EP-sharded. Keep their checkpoint
+        # layout for the startup forward and let the existing runtime fallback
+        # load/repack the generated circulant plan afterward.
+        loader_placement_policy = (
+            placement_policy if not self._database.is_ft_style else "eplb"
+        )
         phy2log = LoadConfig.create_redundant_expert(
             layer_num=self.model_config.num_layers,
             expert_num=self.model_config.expert_num,
@@ -768,6 +776,16 @@ class ModelLoader:
             num_nodes=weights_info.num_nodes,
             phy_exp_num=weights_info.phy_exp_num_,
             phy2log_path=phy2log_path,
+            placement_policy=loader_placement_policy,
+        )
+        logging.info(
+            "eplb loader placement ready before weight load: policy=%s "
+            "loader_policy=%s ft_style=%s layers=%d phy2log[0][:16]=%s",
+            placement_policy,
+            loader_placement_policy,
+            self._database.is_ft_style,
+            len(phy2log),
+            phy2log[0][:16] if phy2log else None,
         )
 
         # dynamic expert balancer
@@ -779,12 +797,20 @@ class ModelLoader:
 
         py_eplb = None
         if weights_info.enable_eplb_:
+            # Non-FT loaders consume phy2log while selecting checkpoint experts, so
+            # their model tensors already contain the final static placement.
+            circulant_preloaded = (
+                placement_policy == "circulant" and not self._database.is_ft_style
+            )
+            if circulant_preloaded:
+                os.environ["EPLB_CIRCULANT_PRELOADED"] = "1"
             py_eplb = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
                 phy2log=phy2log,
                 database=ep_lb_database,
                 model_config=self.model_config,
+                circulant_preloaded=circulant_preloaded,
             )
         return py_eplb, phy2log
 
@@ -817,6 +843,10 @@ class ModelLoader:
                 W.logic_expert_cnt
             ] = logic_expert_cnt.contiguous().to(device)
             weight.weights[layer_id][W.log2phy] = log2phy.contiguous().to(device)
+            if self._py_eplb is not None and self._py_eplb.is_circulant_preloaded():
+                weight.weights[layer_id][W.circulant_preloaded] = torch.ones(
+                    (), dtype=torch.int8, device=device
+                )
 
 
 def get_model_loader(

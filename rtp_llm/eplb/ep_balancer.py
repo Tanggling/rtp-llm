@@ -60,6 +60,7 @@ class ExpertBalancer:
         phy2log: Any,
         database: BaseDatabase,
         model_config: Optional[ModelConfig] = None,
+        circulant_preloaded: bool = False,
     ):
         """
         Initialize ExpertBalancer.
@@ -96,6 +97,8 @@ class ExpertBalancer:
         # Write gpu_load_*.json into the per-arm stats dir (with the eplb_stats
         # exports) instead of the process CWD; falls back to CWD when unset.
         self.gpu_load_dir = os.environ.get("EPLB_STATS_EXPORT_DIR", "")
+        # EPLB_PLAN_LOG=0 disables the gpu_load_*.json plan log entirely.
+        self.plan_log_enabled = os.environ.get("EPLB_PLAN_LOG", "1") != "0"
         self.queue: Queue[int] = Queue()
 
         # Get balance_method from model_config.eplb_config
@@ -150,6 +153,9 @@ class ExpertBalancer:
                 torch.from_numpy(logcnt_np).unsqueeze(0),
             )
         self._circulant_applied = False
+        self._circulant_preloaded = (
+            self.placement_policy == "circulant" and circulant_preloaded
+        )
 
         logging.info(
             f"EPLB plan policies: placement={self.placement_policy}, "
@@ -158,6 +164,9 @@ class ExpertBalancer:
 
     def is_circulant_mode(self) -> bool:
         return self.placement_policy == "circulant"
+
+    def is_circulant_preloaded(self) -> bool:
+        return self._circulant_preloaded
 
     def get_moe_layer_ids(self):
         return list(self.moe_layer_index)
@@ -255,19 +264,20 @@ class ExpertBalancer:
             )
 
         self.phy2log[layer_id] = phy2log[0].tolist()
-        log_data = {
-            "update_cnt": self.update_cnt,
-            "gpu_loads": gpu_loads.tolist(),
-            "log_stats": log_stats.tolist(),
-            "layer": layer_id,
-            "plan": phy2log.tolist(),
-            "phy2log": self.phy2log,
-            "placement": self.placement_policy,
-            "dispatch": self.dispatch_policy,
-            "update_time": time.ctime(),
-        }
-        with open(file_name, "a") as f:
-            f.write(json.dumps(log_data) + "\n")
+        if self.plan_log_enabled:
+            log_data = {
+                "update_cnt": self.update_cnt,
+                "gpu_loads": gpu_loads.tolist(),
+                "log_stats": log_stats.tolist(),
+                "layer": layer_id,
+                "plan": phy2log.tolist(),
+                "phy2log": self.phy2log,
+                "placement": self.placement_policy,
+                "dispatch": self.dispatch_policy,
+                "update_time": time.ctime(),
+            }
+            with open(file_name, "a") as f:
+                f.write(json.dumps(log_data) + "\n")
 
         # note log2phy need to padding
         pad_k = self.num_replicas - self.num_experts + 1

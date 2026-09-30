@@ -46,6 +46,8 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
+from rtp_llm.models_py.utils.expert_stats_probe import get_expert_stats_probe
+from rtp_llm.models_py.utils.phase_timer import get_phase_timer
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -982,6 +984,11 @@ class Qwen3NextDecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
+        # attn / layer checkpoints for PHASE_TIMER=1; no-op when off. The MoE
+        # sub-phases come from GenericMoeLayer, which this layer shares with
+        # GenericMoeDecoderLayer; only the enclosing windows are per-model.
+        self._phase_timer = get_phase_timer()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -991,8 +998,15 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        timer = self._phase_timer
+        timer.layer_begin(self.layer_idx)
+
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        # self_attn is a gated delta net on LINEAR layers and full attention on
+        # the rest, so the attn channel mixes two kinds; split by layer_idx
+        # (full_attention_interval) when reading, not here.
+        timer.attn_begin(self.layer_idx)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
@@ -1000,11 +1014,13 @@ class Qwen3NextDecoderLayer(nn.Module):
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
         )
+        timer.attn_end(self.layer_idx)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states)
 
+        timer.layer_end(self.layer_idx)
         return hidden_states, residual
 
 
@@ -1056,13 +1072,32 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        # Owns the recording window for the whole forward; no-op unless PHASE_TIMER=1
+        self._phase_timer = get_phase_timer()
+        # Owns the per-forward expert counter export; no-op unless
+        # EXPERT_STATS_PROBE=1. Configured in initialize() once the MoE layers
+        # exist. Independent of self.expert_stats (the C++ EPLB buffer).
+        self._expert_stats_probe = get_expert_stats_probe()
 
     def initialize(self, init_resource) -> bool:
         result = super().initialize(init_resource)
+        moe_layers = [
+            layer.mlp for layer in self.layers if isinstance(layer.mlp, GenericMoeLayer)
+        ]
         if self.expert_stats is not None:
-            for layer in self.layers:
-                if isinstance(layer.mlp, GenericMoeLayer):
-                    layer.mlp.expert_stats = self.expert_stats
+            for mlp in moe_layers:
+                mlp.expert_stats = self.expert_stats
+        if moe_layers:
+            # Layer axis spans every model layer so non-MoE layers keep their
+            # index (they simply stay all-zero); the expert axis comes from the
+            # MoE layers, which all share one expert count.
+            self._expert_stats_probe.configure(
+                layer_num=self.layer_num,
+                log_exp_num=moe_layers[0]._logical_expert_num,
+                phy_exp_num=moe_layers[0].num_experts,
+                ep_size=moe_layers[0].ep_size,
+                rank=self.parallelism_config.world_rank,
+            )
         return result
 
     def _build_cp_linear_attn_metadata(
@@ -1184,18 +1219,41 @@ class Qwen3NextModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
 
-        for i, decoder_layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, i)
-            hidden_states, residual = decoder_layer(
-                hidden_states,
-                residual,
-                fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=attention_inputs,
-                attn_meta=attn_meta,
-            )
+        # Phase timing covers prefill only: decode may run under CUDA graph
+        # replay, where host-side event records are not captured.
+        timer = self._phase_timer
+        is_prefill = attention_inputs.is_prefill
+        if is_prefill:
+            timer.begin_forward(inputs.input_ids.numel())
+        # Expert counters follow the same prefill-only window as the phase timer.
+        probe = self._expert_stats_probe
+        probe.begin_forward(is_prefill, inputs.input_ids.numel())
+        recorded = False
+        try:
+            for i, decoder_layer in enumerate(self.layers):
+                select_block_map_for_layer(attention_inputs, i)
+                hidden_states, residual = decoder_layer(
+                    hidden_states,
+                    residual,
+                    fmha_impl,
+                    kv_cache=(
+                        self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                    ),
+                    attention_inputs=attention_inputs,
+                    attn_meta=attn_meta,
+                )
 
-        hidden_states, residual = self.norm(hidden_states, residual)
+            hidden_states, residual = self.norm(hidden_states, residual)
+            recorded = True
+        finally:
+            # A forward that raised is discarded whole, never half-recorded.
+            timer.end_forward(success=recorded)
+            # Exports one NPZ per successful prefill forward, then zeroes.
+            probe.end_forward(success=recorded)
+
+        if is_prefill and timer.capture_armed:
+            timer.flush(rank=self.parallelism_config.world_rank)
+
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 

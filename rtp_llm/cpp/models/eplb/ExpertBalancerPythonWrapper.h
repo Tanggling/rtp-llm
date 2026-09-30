@@ -52,6 +52,8 @@ public:
 
     void createCirculantPlanForLayer(int layer_id, EplbPlanTensors& eplb_plan);
 
+    bool isCirculantPreloaded();
+
 private:
     py::object py_eplb_;
 };

@@ -36,11 +36,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    WfDispatcher,
     logical_to_physical_experts,
     record_expert_stats,
     wf_dispatch,
     wf_k_dispatch,
 )
+from rtp_llm.models_py.utils.expert_stats_probe import get_expert_stats_probe
+from rtp_llm.models_py.utils.phase_timer import get_phase_timer
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -67,6 +70,11 @@ class GenericMoeLayer(nn.Module):
         self._topk_call_count = 0
         # ExpertStatsBuffer, assigned by the model in initialize() when EPLB is enabled
         self.expert_stats = None
+        # MoE phase checkpoints for PHASE_TIMER=1; no-op when off
+        self._phase_timer = get_phase_timer()
+        # Per-forward logical/physical expert counters for EXPERT_STATS_PROBE=1;
+        # no-op when off. Independent of self.expert_stats (the EPLB buffer).
+        self._expert_stats_probe = get_expert_stats_probe()
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -111,6 +119,45 @@ class GenericMoeLayer(nn.Module):
         # Dispatch policy: "rr", "wf"/"wf_iter" (optimized for <=2 replicas),
         # or "wf_k" (general replica count, deliberately CPU-oriented).
         self._dispatch_policy = os.environ.get("EPLB_DISPATCH_POLICY", "rr")
+        # Internal EPLB recording is separate from the external probe. Dynamic
+        # ALL/EPLB arms need this buffer even when the run is otherwise nostats,
+        # while the observation-only arm can disable it independently.
+        # Unset preserves the historical recording behavior for callers outside
+        # this experiment. Formal launchers always set 0/1 explicitly.
+        internal_stats = os.environ.get("EPLB_INTERNAL_STATS", "1") == "1"
+        eplb_mode = os.environ.get("EPLB_MODE", "NONE").strip().upper()
+        if eplb_mode in ("EPLB", "ALL") and not internal_stats:
+            raise ValueError(
+                "EPLB_INTERNAL_STATS=1 is required for EPLB_MODE="
+                f"{eplb_mode}; disabling internal stats would make dynamic "
+                "placement consume empty solver buffers"
+            )
+        # Keep the historical circulant optimization as a second guard. The
+        # explicit internal gate is what distinguishes armA nostats from armB
+        # nostats under the new pure-DP experiment.
+        self._skip_stats_recording = (
+            not internal_stats
+            or (
+                os.environ.get("EPLB_PLACEMENT", "eplb") == "circulant"
+                and os.environ.get("EXPERT_STATS", "0") != "1"
+            )
+        )
+        # Loader-preloaded circulant placement is final before model construction.
+        self._circulant_preloaded = (
+            weights.get(W.circulant_preloaded, None) is not None
+            or os.environ.get("EPLB_CIRCULANT_PRELOADED", "0") == "1"
+        )
+        # Caching placement-derived candidates requires the placement to be
+        # final, not merely circulant: the runtime-fallback path still rewrites
+        # log2phy in place after the first forward, and because the weights are
+        # inference tensors that revision is unobservable. So gate the static
+        # path on the loader preload and leave the fallback on live prep.
+        self._static_wf_placement = (
+            self._circulant_preloaded
+            and os.environ.get("EPLB_PLACEMENT", "eplb") == "circulant"
+            and self._dispatch_policy in ("wf", "wf_iter")
+        )
+        self._wf_dispatcher = None
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -121,6 +168,19 @@ class GenericMoeLayer(nn.Module):
         self.add_shared_expert = config.moe_style == 2
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
+
+        if self._static_wf_placement and self.log2phy is not None:
+            self._wf_dispatcher = WfDispatcher(
+                self._logical_expert_num,
+                self.ep_size,
+                self.log2phy.device,
+            )
+            self._wf_dispatcher.prepare_candidates(
+                self.log2phy,
+                self.logic_expert_cnt,
+                max(1, self.num_experts // self.ep_size),
+            )
+
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type,
@@ -195,6 +255,8 @@ class GenericMoeLayer(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        self._phase_timer.moe_block_begin(self.layer_idx)
+        self._phase_timer.record_moe_checkpoint("moe_start", self.layer_idx)
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
@@ -238,6 +300,8 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        self._phase_timer.record_route_split("topk_done")
+
         logical_topk_ids = topk_ids
         if self.log2phy is not None:
             if self._dispatch_policy == "wf_k":
@@ -249,6 +313,12 @@ class GenericMoeLayer(nn.Module):
                     self.num_experts,
                 )
             elif self._dispatch_policy in ("wf", "wf_iter"):
+                if self._static_wf_placement and self._wf_dispatcher is None:
+                    self._wf_dispatcher = WfDispatcher(
+                        self._logical_expert_num,
+                        self.ep_size,
+                        logical_topk_ids.device,
+                    )
                 topk_ids = wf_dispatch(
                     logical_topk_ids,
                     self.log2phy,
@@ -256,6 +326,8 @@ class GenericMoeLayer(nn.Module):
                     self.ep_size,
                     self.num_experts,
                     policy=self._dispatch_policy,
+                    dispatcher=self._wf_dispatcher,
+                    static_placement=self._static_wf_placement,
                 )
             else:
                 topk_ids = logical_to_physical_experts(
@@ -264,6 +336,9 @@ class GenericMoeLayer(nn.Module):
                     self.logic_expert_cnt,
                     self.parallelism_config.dp_rank,
                 )
+
+        # Closes the policy window: rr / wf / wf_iter / wf_k and nothing else.
+        self._phase_timer.record_route_split("policy_done")
 
         if (
             self._log2phy_dbg_interval > 0
@@ -274,35 +349,9 @@ class GenericMoeLayer(nn.Module):
             if self._log2phy_dbg_cnt % self._log2phy_dbg_interval == 0:
                 self._dbg_dump_dispatch(logical_topk_ids, topk_ids)
 
-        if self.expert_stats is not None:
-            record_expert_stats(
-                logical_topk_ids,
-                self.expert_stats.log_stats_buf,
-                self.expert_stats.gpu_loads_buf,
-                self.layer_idx,
-                topk_ids,
-                self.num_experts,
-            )
-
-        if _MOE_TOPK_EXPORT_DIR and self.parallelism_config.dp_rank == 0:
-            step = self._topk_call_count
-            self._topk_call_count += 1
-            export_path = os.path.join(
-                _MOE_TOPK_EXPORT_DIR,
-                f"layer_{self.layer_idx:03d}_step_{step:06d}.pt",
-            )
-            torch.save(
-                {
-                    "layer_idx": self.layer_idx,
-                    "step": step,
-                    "logical_topk_ids": logical_topk_ids.cpu(),
-                    "topk_weights": topk_weights.cpu(),
-                    "num_tokens": num_tokens,
-                    "num_experts": self.num_experts,
-                    "top_k": self.top_k,
-                },
-                export_path,
-            )
+        # Closes the gate+topk+EPLB-remap window: everything after this point is
+        # the dispatch / GEMM / combine pipeline inside self.fused_moe.
+        self._phase_timer.record_moe_checkpoint("route_done", self.layer_idx)
 
         is_ep_mode = self.ep_size > 1
         # EP mode: routed expert output is already complete (EP combine handles it).
@@ -343,6 +392,47 @@ class GenericMoeLayer(nn.Module):
                     )
                 else:
                     experts_output = experts_output + shared_expert_output
+
+        self._phase_timer.moe_block_end(self.layer_idx)
+
+        # Stats recording deferred past every phase_timer window: the recording
+        # kernel cost ~0.2-0.8ms/layer (up to 30% of gate_route at bs32) and was
+        # inflating the route window. Safe to defer because the EPLB consumer
+        # (ExpertBalancer::excuteEplbPlan) drains these buffers between forwards,
+        # and same-stream ordering guarantees the increments land before then.
+        if self.expert_stats is not None and not self._skip_stats_recording:
+            record_expert_stats(
+                logical_topk_ids,
+                self.expert_stats.log_stats_buf,
+                self.expert_stats.gpu_loads_buf,
+                self.layer_idx,
+                topk_ids,
+                self.num_experts,
+            )
+
+        # The only point where the logical and physical id tensors are both live.
+        self._expert_stats_probe.record(self.layer_idx, logical_topk_ids, topk_ids)
+
+        # export topk activation
+        if _MOE_TOPK_EXPORT_DIR and self.parallelism_config.dp_rank == 0:
+            step = self._topk_call_count
+            self._topk_call_count += 1
+            export_path = os.path.join(
+                _MOE_TOPK_EXPORT_DIR,
+                f"layer_{self.layer_idx:03d}_step_{step:06d}.pt",
+            )
+            torch.save(
+                {
+                    "layer_idx": self.layer_idx,
+                    "step": step,
+                    "logical_topk_ids": logical_topk_ids.cpu(),
+                    "topk_weights": topk_weights.cpu(),
+                    "num_tokens": num_tokens,
+                    "num_experts": self.num_experts,
+                    "top_k": self.top_k,
+                },
+                export_path,
+            )
 
         return experts_output
 
@@ -427,6 +517,9 @@ class GenericMoeDecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
+        # attn / layer checkpoints for PHASE_TIMER=1; no-op when off
+        self._phase_timer = get_phase_timer()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -434,18 +527,24 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
+        timer = self._phase_timer
+        timer.layer_begin(self.layer_idx)
+
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        timer.attn_begin(self.layer_idx)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
         )
+        timer.attn_end(self.layer_idx)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states)
 
+        timer.layer_end(self.layer_idx)
         return DecodeLayerOutput(hidden_states, residual)
 
 
@@ -501,13 +600,30 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        # Owns the recording window for the whole forward; no-op unless PHASE_TIMER=1
+        self._phase_timer = get_phase_timer()
+        # Owns the per-forward expert counter export; no-op unless
+        # EXPERT_STATS_PROBE=1. Configured in initialize() once the MoE layers exist.
+        self._expert_stats_probe = get_expert_stats_probe()
 
     def initialize(self, init_resource) -> bool:
         result = super().initialize(init_resource)
+        moe_layers = [
+            layer.mlp for layer in self.layers if isinstance(layer.mlp, GenericMoeLayer)
+        ]
         if self.expert_stats is not None:
-            for layer in self.layers:
-                if isinstance(layer.mlp, GenericMoeLayer):
-                    layer.mlp.expert_stats = self.expert_stats
+            for mlp in moe_layers:
+                mlp.expert_stats = self.expert_stats
+        if moe_layers:
+            # Layer axis spans every model layer so dense layers keep their index
+            # (they simply stay all-zero); the expert axis comes from the MoE layers.
+            self._expert_stats_probe.configure(
+                layer_num=self.layer_num,
+                log_exp_num=moe_layers[0]._logical_expert_num,
+                phy_exp_num=moe_layers[0].num_experts,
+                ep_size=moe_layers[0].ep_size,
+                rank=self.parallelism_config.world_rank,
+            )
         return result
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
@@ -523,25 +639,48 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
-            output = decoder_layer(
-                hidden_states,
-                residual,
-                fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-            )
-            hidden_states = output.hidden_states
-            residual = output.residual
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # Phase timing covers prefill only: decode may run under CUDA graph
+        # replay, where host-side event records are not captured.
+        timer = self._phase_timer
+        is_prefill = inputs.attention_inputs.is_prefill
+        if is_prefill:
+            timer.begin_forward(input_ids.numel())
+        # Expert counters follow the same prefill-only window as the phase timer.
+        probe = self._expert_stats_probe
+        probe.begin_forward(is_prefill, input_ids.numel())
+        recorded = False
+        try:
+            for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+                select_block_map_for_layer(inputs.attention_inputs, i)
+                output = decoder_layer(
+                    hidden_states,
+                    residual,
+                    fmha_impl,
+                    kv_cache=(
+                        self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                    ),
+                )
+                hidden_states = output.hidden_states
+                residual = output.residual
+
+            hidden_states, _ = self.norm(hidden_states, residual)
+            recorded = True
+        finally:
+            # A forward that raised is discarded whole, never half-recorded.
+            timer.end_forward(success=recorded)
+            # Exports one NPZ per successful prefill forward, then zeroes.
+            probe.end_forward(success=recorded)
+
+        if is_prefill and timer.capture_armed:
+            timer.flush(rank=self.parallelism_config.world_rank)
 
         if prof:
             end_ev.record()
             torch.cuda.synchronize()
             _LOGGER.warning(
                 "[PREFILL_PROF] rank=%d prefill_ms=%.3f tokens=%d",
-                self.parallelism_config.tp_rank,
+                self.parallelism_config.world_rank,
                 start_ev.elapsed_time(end_ev),
                 input_ids.numel(),
             )

@@ -175,5 +175,20 @@ class Qwen2Moe(QWenV2):
     def get_weight_cls():
         return QWenV2MoeWeight
 
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
+
+        self.py_model = GenericMoeModel(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+        return self.py_model
+
 
 register_model("qwen_2_moe", Qwen2Moe, ["Qwen2MoeForCausalLM"])

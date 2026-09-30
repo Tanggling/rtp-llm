@@ -33,6 +33,17 @@ py_test (
 )
 
 py_test (
+    name = "phase_timer_test",
+    srcs = ["phase_timer_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'1'},
+)
+
+py_test (
     name = "typed_storage_view_test",
     srcs = ["typed_storage_view_test.py"],
     deps = [

@@ -30,6 +30,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.phase_timer import get_phase_timer
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
@@ -76,6 +77,8 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self.async_mode = False
         self.expert_alignment = expert_alignment
         self.handle: Any = None
+        # dispatch sub-checkpoints for PHASE_TIMER_DISPATCH_SPLIT=1; no-op when off
+        self._phase_timer = get_phase_timer()
 
     def prepare(
         self,
@@ -117,6 +120,8 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             tp_expert_a1 = torch.narrow(a1, 0, slice_begin, slice_size)
             tp_expert_input = tp_expert_a1
 
+        self._phase_timer.record_dispatch_split("quant_done")
+
         # pre dispatch
         tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
             torch.int64
@@ -132,6 +137,8 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
             tp_expert_ids, self.expert_num
         )
+
+        self._phase_timer.record_dispatch_split("layout_done")
 
         # dispatch
         (
@@ -167,6 +174,13 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         expert_num_tokens = torch.tensor(
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
+        )
+        self._phase_timer.record_deepep_traffic(
+            source_tokens=slice_size,
+            source_assignments=(tp_expert_ids >= 0).sum(),
+            dispatch_send_by_rank=num_tokens_per_rank,
+            dispatch_recv_rows=expert_x.size(0),
+            local_assignments=expert_num_tokens.sum(),
         )
 
         if recv_topk_idx.numel() != 0 and (not use_fp8) and (not use_fp4):

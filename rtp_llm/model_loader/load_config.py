@@ -1,4 +1,5 @@
 import enum
+import hashlib
 import json
 import logging
 from typing import Any, List, Optional, Union
@@ -128,7 +129,11 @@ class LoadConfig(BaseModel):
         ep_size: int,
         num_nodes: int,
         phy2log_path: Optional[str] = None,
+        placement_policy: str = "eplb",
     ):
+        if placement_policy not in ("eplb", "circulant"):
+            raise ValueError(f"unsupported EPLB placement policy: {placement_policy}")
+
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
         expert_num_per_ep = expert_num // ep_size
@@ -148,16 +153,70 @@ class LoadConfig(BaseModel):
         phy2log: List[List[int]] = []
 
         if phy2log_path:
-            with open(phy2log_path, "r") as f:
+            with open(phy2log_path, "r", encoding="utf-8") as f:
                 phy2log = json.load(f)
                 check_with_info(
-                    len(phy2log) == layer_num,
-                    f"phy2log len {len(phy2log)} != layer_num {layer_num}",
+                    isinstance(phy2log, list) and len(phy2log) == layer_num,
+                    f"phy2log must contain {layer_num} layers",
                 )
                 check_with_info(
-                    len(phy2log[0]) == phy_exp_num,
-                    f"phy2log[0] len {len(phy2log[0])} != phy_exp_num {phy_exp_num}",
+                    all(isinstance(layer, list) for layer in phy2log),
+                    "phy2log layers must be lists",
                 )
+                check_with_info(
+                    all(len(layer) == phy_exp_num for layer in phy2log),
+                    f"every phy2log layer must have {phy_exp_num} entries",
+                )
+                check_with_info(
+                    all(
+                        isinstance(expert, int) and 0 <= expert < expert_num
+                        for layer in phy2log
+                        for expert in layer
+                    ),
+                    f"phy2log expert IDs must be integers in [0, {expert_num})",
+                )
+                check_with_info(
+                    all(
+                        set(range(expert_num)).issubset(set(layer))
+                        for layer in phy2log
+                    ),
+                    "every phy2log layer must cover every logical expert",
+                )
+                canonical = json.dumps(
+                    phy2log, sort_keys=True, separators=(",", ":")
+                ).encode()
+                placement_digest = hashlib.sha256(canonical).hexdigest()
+                expert_per_ep = phy_exp_num // ep_size
+                check_with_info(
+                    all(
+                        len(layer[rank * expert_per_ep:(rank + 1) * expert_per_ep])
+                        == expert_per_ep
+                        for layer in phy2log
+                        for rank in range(ep_size)
+                    ),
+                    f"every rank slice must contain {expert_per_ep} physical experts",
+                )
+                logging.info(
+                    "external phy2log placement validated before weight load: "
+                    "path=%s digest=%s layers=%s logical=%s physical=%s "
+                    "additional=%s ep_size=%s per_rank=%s",
+                    phy2log_path,
+                    placement_digest,
+                    layer_num,
+                    expert_num,
+                    phy_exp_num,
+                    redundant_expert,
+                    ep_size,
+                    expert_per_ep,
+                )
+        elif placement_policy == "circulant":
+            # Import lazily to keep the general loader free of EPLB policy imports.
+            from rtp_llm.eplb.plan_policies import build_circulant_plan
+
+            layer_phy2log, _, _ = build_circulant_plan(
+                expert_num, phy_exp_num, ep_size
+            )
+            phy2log = [layer_phy2log.tolist() for _ in range(layer_num)]
         elif redundant_expert % ep_size == 0:
             redundant_expert_per_ep = redundant_expert // ep_size
             for _ in range(layer_num):

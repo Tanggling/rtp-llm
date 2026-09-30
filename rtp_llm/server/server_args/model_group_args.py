@@ -15,6 +15,14 @@ def init_model_group_args(parser, model_args):
         help="分词器的路径",
     )
     model_group.add_argument(
+        "--phy2log_path",
+        env_name="PHY2LOG_PATH",
+        bind_to=(model_args, "phy2log_path"),
+        type=str,
+        default="",
+        help="静态 EPLB phy2log placement JSON 路径",
+    )
+    model_group.add_argument(
         "--act_type",
         env_name="ACT_TYPE",
         bind_to=(model_args, "act_type"),

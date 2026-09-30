@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include <algorithm>
+#include <cinttypes>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -12,6 +13,31 @@
 using namespace std;
 
 namespace rtp_llm {
+namespace {
+
+uint64_t fnv1aTensorI32(uint64_t hash, const torch::Tensor& tensor) {
+    auto contiguous = tensor.to(torch::kCPU).contiguous();
+    const auto* data = contiguous.data_ptr<int32_t>();
+    for (int64_t i = 0; i < contiguous.numel(); ++i) {
+        uint32_t value = static_cast<uint32_t>(data[i]);
+        for (int byte = 0; byte < 4; ++byte) {
+            hash ^= static_cast<uint8_t>(value & 0xffU);
+            hash *= UINT64_C(1099511628211);
+            value >>= 8;
+        }
+    }
+    return hash;
+}
+
+uint64_t planDigest(const EplbPlanTensors& plan) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    hash = fnv1aTensorI32(hash, plan.layer_id_buf);
+    hash = fnv1aTensorI32(hash, plan.logic_expert_cnt);
+    hash = fnv1aTensorI32(hash, plan.log2phy);
+    return fnv1aTensorI32(hash, plan.phy2log);
+}
+
+}  // namespace
 
 void EplbPlanBuffers::init(size_t    log_exp_num,
                            size_t    phy_exp_num,
@@ -197,6 +223,15 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
 
     stats_export_step_ = autil::EnvUtil::getEnv("EPLB_STATS_EXPORT_STEP", 100);
     stats_export_dir_  = autil::EnvUtil::getEnv("EPLB_STATS_EXPORT_DIR", std::string("eplb_stats"));
+    max_layer_updates_ = autil::EnvUtil::getEnv("EPLB_MAX_LAYER_UPDATES", 0);
+    plan_diagnostic_   = autil::EnvUtil::getEnv("EPLB_PLAN_DIAGNOSTIC", false);
+    if (plan_diagnostic_) {
+        printf("[EPLB_DIAG] enabled rank=%zu (smoke-only plan hashing)\n", ep_rank_);
+    }
+    if (max_layer_updates_ > 0) {
+        printf("[EPLB] placement freeze enabled: will stop updating after %ld layer exchanges\n",
+               (long)max_layer_updates_);
+    }
     if (stats_export_step_ > 0) {
         export_log_stats_ = torch::zeros({(int64_t)num_layers, (int64_t)log_exp_num}, torch::kInt64);
         export_gpu_loads_ = torch::zeros({(int64_t)num_layers, (int64_t)ep_size_}, torch::kInt64);
@@ -209,10 +244,16 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     resetPlan(true);
 
     auto placement_env = autil::EnvUtil::getEnv("EPLB_PLACEMENT", std::string("eplb"));
-    circulant_mode_    = (placement_env == "circulant");
+    circulant_mode_      = (placement_env == "circulant");
+    circulant_preloaded_ = circulant_mode_ && eplb_python_wrapper_.isCirculantPreloaded();
     if (circulant_mode_) {
-        printf("[EPLB] circulant mode enabled: static plan will be batch-applied "
-               "to all MoE layers once, bypassing per-layer EPLB cycle\n");
+        if (circulant_preloaded_) {
+            printf("[EPLB] circulant mode enabled: placement preloaded; skipping runtime weight exchange\n");
+            circulant_applied_ = true;
+        } else {
+            printf("[EPLB] circulant mode enabled: static plan will be batch-applied "
+                   "to all MoE layers once, bypassing per-layer EPLB cycle\n");
+        }
     }
 }
 
@@ -220,6 +261,7 @@ ExpertBalancer::~ExpertBalancer() {}
 
 void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector) {
     syncController();
+    engine_step_cnt_++;
 
     OverallExpertStats& stats = model.overall_expert_stats_;
 
@@ -240,6 +282,30 @@ void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollecto
 
     // periodic activation dump (STATS / ALL mode)
     exportStats(stats);
+
+    if (frozen_) {
+        // placement pinned after EPLB_MAX_LAYER_UPDATES exchanges. Kept after
+        // reportStats/exportStats on purpose: the runtime load on the frozen
+        // placement stays observable. Only planning is skipped.
+        stats.stats_buf.log_stats_buf.zero_();
+        stats.stats_buf.gpu_loads_buf.zero_();
+        return;
+    }
+
+    if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS)) {
+        // STATS is observation-only: never enter the plan path at all. The mode
+        // gate inside excuteEplbPlan already blocks updateStats/createPlan, but
+        // the circulant branch sits *before* that gate, so STATS combined with
+        // EPLB_PLACEMENT=circulant would still batch-apply a placement. Hoisting
+        // the check here makes "stats arm never touches placement" hold for every
+        // placement, not just eplb. (Load-time circulant preload is a separate
+        // path in the constructor and is not covered by this guard.)
+        // Same buffer zeroing as the paths below: stats_buf holds per-step
+        // increments and exportStats would otherwise double count.
+        stats.stats_buf.log_stats_buf.zero_();
+        stats.stats_buf.gpu_loads_buf.zero_();
+        return;
+    }
 
     // eplb plan
     excuteEplbPlan(stats, model);
@@ -460,8 +526,34 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model)
                 if (syncPlanWeightsLoadStatus()) {
                     processPlanWeights();
                     applyPlanWeights(model);
+                    eplb_plan_cnt_++;
+                    printf("[EPLB_APPLY] rank=%zu sequence=%zu step=%ld layer=%d\n",
+                           ep_rank_,
+                           eplb_plan_cnt_,
+                           (long)engine_step_cnt_,
+                           eplb_plan_buffers_.layer_id);
+                    if (plan_diagnostic_) {
+                        printf("[EPLB_APPLY_DIAG] rank=%zu sequence=%zu step=%ld layer=%d digest=%016" PRIx64 "\n",
+                               ep_rank_,
+                               pending_plan_sequence_,
+                               (long)engine_step_cnt_,
+                               eplb_plan_buffers_.layer_id,
+                               pending_plan_digest_);
+                    }
+                    fflush(stdout);
                     load_flags_.setReady(false);
                     balance_layer_cnt_++;
+
+                    if (max_layer_updates_ > 0 && balance_layer_cnt_ >= (size_t)max_layer_updates_) {
+                        printf("[EPLB] freeze: %ld layer exchanges applied (layer %d was the last); "
+                               "placement fixed from now on\n",
+                               (long)balance_layer_cnt_,
+                               eplb_plan_buffers_.layer_id);
+                        frozen_ = true;
+                        setPlanStatus(EplbPlanStatus::INIT);
+                        resetPlan();
+                        break;
+                    }
 
                     if (balance_layer_cnt_ >= balance_layer_per_step_) {
                         update_cnt_        = 0;
@@ -481,6 +573,9 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model)
 
 void ExpertBalancer::resetPlan(bool force_clean) {
     stats_.reset();
+    pending_plan_digest_   = 0;
+    pending_plan_layer_id_ = -1;
+    pending_plan_sequence_ = 0;
 }
 
 void ExpertBalancer::copyFromTensor(const torch::Tensor& src, torch::Tensor& dst) {
@@ -536,6 +631,26 @@ void ExpertBalancer::createPlan() {
     copyToTensor(eplb_plan_buffers_.logic_expert_cnt, eplb_plan_tensors_.logic_expert_cnt);
     copyToTensor(eplb_plan_buffers_.log2phy, eplb_plan_tensors_.log2phy);
     copyToTensor(eplb_plan_buffers_.phy2log, eplb_plan_tensors_.phy2log);
+
+    if (plan_diagnostic_) {
+        pending_plan_digest_   = planDigest(eplb_plan_tensors_);
+        pending_plan_layer_id_ = eplb_plan_tensors_.layer_id_buf.item<int32_t>();
+        pending_plan_sequence_ = eplb_plan_cnt_ + 1;
+        int64_t logic_mass     = eplb_plan_tensors_.logic_expert_cnt.sum().item<int64_t>();
+        printf("[EPLB_PLAN] rank=%zu sequence=%zu step=%ld layer=%d digest=%016" PRIx64
+               " layer_n=%ld logic_n=%ld log2phy_n=%ld phy2log_n=%ld logic_mass=%ld\n",
+               ep_rank_,
+               pending_plan_sequence_,
+               (long)engine_step_cnt_,
+               pending_plan_layer_id_,
+               pending_plan_digest_,
+               (long)eplb_plan_tensors_.layer_id_buf.numel(),
+               (long)eplb_plan_tensors_.logic_expert_cnt.numel(),
+               (long)eplb_plan_tensors_.log2phy.numel(),
+               (long)eplb_plan_tensors_.phy2log.numel(),
+               (long)logic_mass);
+        fflush(stdout);
+    }
 }
 
 void ExpertBalancer::processPlanWeights() {

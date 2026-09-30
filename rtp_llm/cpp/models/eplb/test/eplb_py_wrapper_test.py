@@ -75,8 +75,12 @@ class FakeResult:
 
 
 class FakeExpertBalancer:
-    def __init__(self, res: FakeResult):
+    def __init__(self, res: FakeResult, circulant_preloaded: bool = False):
         self.res = res
+        self.circulant_preloaded = circulant_preloaded
+
+    def is_circulant_preloaded(self):
+        return self.circulant_preloaded
 
     def create_balance_plan(self, log_stats: torch.Tensor, gpu_loads: torch.Tensor):
         return (
@@ -150,6 +154,13 @@ class TestEplbPyWrapper(unittest.TestCase):
         config = TestMoeConfig()
         config.use_fp8 = True
         self._single_test(config)
+
+    def test_circulant_preloaded_query(self):
+        config = TestMoeConfig()
+        res = FakeResult(config)
+        eplb_op = EplbPyWrapperOP()
+        eplb_op.init(FakeExpertBalancer(res, circulant_preloaded=True))
+        self.assertTrue(eplb_op.is_circulant_preloaded())
 
 
 if __name__ == "__main__":

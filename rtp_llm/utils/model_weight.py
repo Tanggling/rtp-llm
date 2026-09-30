@@ -1274,6 +1274,7 @@ class W:
     # eplb
     log2phy = "moe_eplb.log2phy"
     logic_expert_cnt = "moe_eplb.logic_expert_cnt"
+    circulant_preloaded = "moe_eplb.circulant_preloaded"
 
     # deepseek3 noaux_tc
     e_score_correction_b = "partial_moe_weights.e_score_correction_bias"

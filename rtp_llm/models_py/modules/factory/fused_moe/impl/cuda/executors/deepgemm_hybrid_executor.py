@@ -43,6 +43,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
+from rtp_llm.models_py.utils.phase_timer import get_phase_timer
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
@@ -125,6 +126,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
 
         self.num_gemm_sms = get_num_device_sms()
+        # align / kernels / tail split inside the T2..T3 window; no-op when off
+        self._phase_timer = get_phase_timer()
 
     def execute(
         self,
@@ -246,6 +249,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 device=hidden_states_fp8_device,
                 dtype=torch.bfloat16,
             )
+            self._phase_timer.record_gemm_split("align_done")
+
             # Gate and Up GroupGEMM-0
             m_grouped_fp8_gemm_nt_masked(
                 (input_tensor[0], input_tensor[1]),
@@ -335,6 +340,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             # Free down_input and down_input_scale
             dispose_tensor(down_input)
             dispose_tensor(down_input_scale)
+            self._phase_timer.record_gemm_split("kernels_done")
 
             gather_out = torch.empty(
                 hidden_states_fp8_shape,
@@ -407,6 +413,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             topk_idx = topk_idx.clamp(min=-1, max=num_experts_local - 1)
 
         if all_tokens <= 0:
+            # Keep the optional split channel complete even on an idle rank.
+            self._phase_timer.record_gemm_split("align_done")
+            self._phase_timer.record_gemm_split("kernels_done")
             return CombineForwardPayload(
                 fused_expert_output=torch.zeros(
                     hidden_states_fp8.shape,
@@ -470,6 +479,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
         if not is_deep_gemm_e8m0_used():
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
+        self._phase_timer.record_gemm_split("align_done")
+
         m_grouped_fp8_gemm_nt_contiguous(
             (input_tensor[0], input_tensor[1]),
             self.w13_weight_fp8,
@@ -515,6 +526,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
         )
         del down_input_fp8, down_input_scale
+        self._phase_timer.record_gemm_split("kernels_done")
+
         gather_out = torch.empty(
             hidden_states_fp8_shape,
             device=hidden_states_fp8_device,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <string>
 #include "rtp_llm/cpp/models/eplb/ExpertBalancerPythonWrapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -165,14 +166,30 @@ private:
 
     bool test_mode_ = false;
 
-    bool circulant_mode_    = false;
-    bool circulant_applied_ = false;
+    bool circulant_mode_      = false;
+    bool circulant_preloaded_ = false;
+    bool circulant_applied_   = false;
+
+    // EPLB_MAX_LAYER_UPDATES: freeze the placement after this many per-layer
+    // weight exchanges have been applied (0 = unlimited, the legacy behavior).
+    // Lets a warmup batch drive 1-2 rebalances and then pins the placement for
+    // the test region.
+    int64_t max_layer_updates_ = 0;
+    bool    frozen_            = false;
+
+    // Optional correctness-smoke diagnostics. Tensor hashing stays disabled for
+    // formal runs; the compact apply line remains unconditional for attribution.
+    bool     plan_diagnostic_          = false;
+    uint64_t pending_plan_digest_      = 0;
+    int      pending_plan_layer_id_    = -1;
+    size_t   pending_plan_sequence_    = 0;
 
     // STATS-mode export: periodically dump accumulated activation counts to JSON
     int64_t       stats_export_step_ = 0;  // 0 = disabled
     std::string   stats_export_dir_;
     int64_t       stats_export_cnt_ = 0;
     int64_t       total_step_cnt_   = 0;
+    int64_t       engine_step_cnt_  = 0;
     torch::Tensor export_log_stats_;  // host [layer, log_exp_num], INT64
     torch::Tensor export_gpu_loads_;  // host [layer, ep_size], INT64
 };

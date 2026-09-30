@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
+from rtp_llm.models_py.utils.phase_timer import get_phase_timer
 
 
 @dataclass
@@ -168,6 +169,8 @@ class FusedMoe(torch.nn.Module):
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
+        # dispatch / gemm / combine boundaries for PHASE_TIMER=1; no-op when off
+        self._phase_timer = get_phase_timer()
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -198,12 +201,19 @@ class FusedMoe(torch.nn.Module):
             topk_ids,
         )
 
+        self._phase_timer.record_moe_checkpoint("dispatch_done")
+
         if expert_payload.expert_topk_ids is None:
             expert_payload.expert_topk_ids = topk_ids
         if expert_payload.expert_topk_weights is None:
             expert_payload.expert_topk_weights = topk_weights
 
         if expert_payload.expert_x.numel() == 0:
+            self._phase_timer.record_moe_scheduled_rows(
+                torch.zeros(
+                    (), device=expert_payload.expert_x.device, dtype=torch.int64
+                )
+            )
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph
             # incompatible all2all kernels like the DeepEP high-throughput
@@ -225,6 +235,8 @@ class FusedMoe(torch.nn.Module):
                 extra_expert_args=extra_expert_args,
             )
 
+        self._phase_timer.record_moe_checkpoint("gemm_done")
+
         # pass a1.shape to finalize for shape check
         if extra_finalize_args is None:
             extra_finalize_args = {"a1_shape": a1.shape}
@@ -240,6 +252,8 @@ class FusedMoe(torch.nn.Module):
             apply_router_weight_on_input,
             extra_finalize_args,
         )
+
+        self._phase_timer.record_moe_checkpoint("combine_done")
 
         assert (
             output.shape == hidden_states.shape

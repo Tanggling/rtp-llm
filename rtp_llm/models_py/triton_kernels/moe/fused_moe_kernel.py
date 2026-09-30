@@ -182,9 +182,19 @@ def moe_align_block_size_torch(
     topk_ids: torch.Tensor,  # [M, top_k]
     block_size: int,
     num_experts: int,
+    skip_invalid: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Align tokens to experts in blocks of block_size for the fused MoE kernel.
+
+    Args:
+        skip_invalid: how to treat rows whose expert id falls outside
+            [0, num_experts). False (default) clamps them into range, so they are
+            still scheduled and computed. True routes them to a sentinel bucket
+            that is laid out *after* num_tokens_post_padded, so the kernel's
+            early-exit skips them and no GEMM work is spent on them. Callers that
+            pass sentinel ids must zero-init the output tensor, since the rows of
+            skipped entries are never written.
 
     Returns:
         sorted_token_ids: [max_padded] padded token indices (may be larger than needed)
@@ -198,20 +208,35 @@ def moe_align_block_size_torch(
     # Pre-allocate to max possible size to avoid GPU→CPU sync
     max_padded = num_valid + num_experts * block_size
 
+    # Bucket each row. In skip_invalid mode out-of-range ids get their own bucket
+    # (index num_experts) whose rows are never scheduled; otherwise they are
+    # clamped into range and computed like any other row.
+    if skip_invalid:
+        num_buckets = num_experts + 1
+        bucket_ids = torch.where(
+            (flat_ids >= 0) & (flat_ids < num_experts),
+            flat_ids,
+            torch.full_like(flat_ids, num_experts),
+        ).long()
+    else:
+        num_buckets = num_experts
+        bucket_ids = flat_ids.clamp(min=0, max=num_experts - 1).long()
+
     # Count tokens per expert via scatter_add (CUDA-graph-safe, no CPU-GPU sync
     # unlike torch.bincount which reads GPU data on CPU to determine output size)
     tokens_per_expert = torch.zeros(
-        num_experts, dtype=torch.int32, device=topk_ids.device
+        num_buckets, dtype=torch.int32, device=topk_ids.device
     )
-    clamped_ids = flat_ids.clamp(min=0, max=num_experts - 1).long()
     tokens_per_expert.scatter_add_(
-        0, clamped_ids, torch.ones(num_valid, dtype=torch.int32, device=topk_ids.device)
+        0, bucket_ids, torch.ones(num_valid, dtype=torch.int32, device=topk_ids.device)
     )
     padded_counts = ((tokens_per_expert + block_size - 1) // block_size) * block_size
 
-    # expert_offsets[0]=0, expert_offsets[i]=sum(padded_counts[:i])
+    # expert_offsets[0]=0, expert_offsets[i]=sum(padded_counts[:i]). Index
+    # num_experts is the end of the real (scheduled) region either way: in
+    # skip_invalid mode the sentinel bucket sits past it and is not counted.
     expert_offsets = torch.zeros(
-        num_experts + 1, dtype=torch.int32, device=topk_ids.device
+        num_buckets + 1, dtype=torch.int32, device=topk_ids.device
     )
     torch.cumsum(padded_counts.int(), dim=0, out=expert_offsets[1:])
     num_tokens_post_padded = expert_offsets[
@@ -219,18 +244,19 @@ def moe_align_block_size_torch(
     ]  # [1] view, stays on GPU
 
     # Sort tokens by expert + compute positions (reuse cumsum for expert_start)
-    sorted_order = flat_ids.argsort(stable=True)
-    sorted_expert_ids = flat_ids[sorted_order]
+    sorted_order = bucket_ids.argsort(stable=True)
+    sorted_expert_ids = bucket_ids[sorted_order]
 
     # expert_start[i] = sum(tokens_per_expert[:i]) — reuse tokens_per_expert cumsum
-    expert_start = torch.zeros(num_experts, dtype=torch.int32, device=topk_ids.device)
+    expert_start = torch.zeros(num_buckets, dtype=torch.int32, device=topk_ids.device)
     torch.cumsum(tokens_per_expert[:-1].int(), dim=0, out=expert_start[1:])
     position_in_expert = (
         torch.arange(num_valid, device=topk_ids.device)
         - expert_start[sorted_expert_ids]
     )
 
-    # Scatter sorted tokens into padded layout
+    # Scatter sorted tokens into padded layout. Sentinel rows land in
+    # [num_tokens_post_padded, max_padded) and are never read.
     sorted_token_ids = torch.full(
         (max_padded,), num_valid, dtype=torch.int32, device=topk_ids.device
     )
@@ -240,7 +266,7 @@ def moe_align_block_size_torch(
     # Expert ids per block: use searchsorted instead of repeat_interleave
     max_blocks = max_padded // block_size
     # block_boundaries[i] = expert_offsets[i+1] / block_size = cumulative blocks for experts 0..i
-    block_boundaries = expert_offsets[1:] // block_size  # [E]
+    block_boundaries = expert_offsets[1 : num_experts + 1] // block_size  # [E]
     block_indices = torch.arange(max_blocks, dtype=torch.int32, device=topk_ids.device)
     expert_ids = torch.searchsorted(block_boundaries, block_indices, right=True).int()
     # Blocks beyond actual content get expert_id >= num_experts, which is fine

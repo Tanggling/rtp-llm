@@ -200,7 +200,7 @@ class GrpcClientWrapper:
                 req = json.loads(req)
             epld_req = pb2.UpdateEplbConfigRequestPB(
                 mode=req.get("mode", "NONE"),
-                update_time=int(time.time()),
+                update_time=int(req.get("update_time", int(time.time()))),
             )
             await self.stub.UpdateEplbConfig(epld_req)
             return {"status": "ok"}
