@@ -25,6 +25,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+)
 from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     FP4_BLOCK,
     FP8_BLOCK,
@@ -41,15 +44,21 @@ def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
     from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
     if scale.dtype == torch.float8_e8m0fnu:
-        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
         if scale.dim() != 2:
             raise ValueError(f"FP8 scale must be 2D, got {scale.dim()}D")
-        row_count = scale.shape[0] * FP8_BLOCK
-        row_index = torch.arange(row_count, device=scale.device) // FP8_BLOCK
-        scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(
-            scale.float().index_select(-2, row_index)
-        )
+        if is_deep_gemm_e8m0_used():
+            from deep_gemm.utils.layout import (
+                get_mn_major_tma_aligned_packed_ue8m0_tensor,
+            )
+
+            row_count = scale.shape[0] * FP8_BLOCK
+            row_index = torch.arange(row_count, device=scale.device) // FP8_BLOCK
+            scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(
+                scale.float().index_select(-2, row_index)
+            )
+        else:
+            weight = weight.reshape(weight.shape[-1], -1)
+            scale = scale.float().reshape(scale.shape[-1], -1)
     local_weights = {"weight": weight, "scale": scale}
     return LinearFactory.create_linear_from_weights(
         local_weights,

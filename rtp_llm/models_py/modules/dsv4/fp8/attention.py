@@ -77,6 +77,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, Compres
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -390,7 +393,14 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     deliver the scale already packed (dtype int32) — we no-op then."""
     assert s is not None, "expected non-null FP8 scale"
     if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
+        if is_deep_gemm_e8m0_used():
+            s = _repack_v4_fp8_scale_to_int32(s)
+        else:
+            # Legacy DeepGEMM consumes FP8 weights in [K, N] loader layout
+            # with float32 block scales. The factory restores both tensors to
+            # [N, K] / [N/128, K/128] before invoking the kernel.
+            w = w.reshape(w.shape[-1], -1)
+            s = s.float().reshape(s.shape[-1], -1)
     # LinearFactory.create_linear_from_weights consumes a (weights_dict,
     # weight_key, scale_key) triple — feed it a one-shot dict so the
     # factory plumbing is unchanged.
@@ -410,7 +420,12 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     w = weights[weight_key]
     s = weights[scale_key]
     if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
+        if is_deep_gemm_e8m0_used():
+            s = _repack_v4_fp8_scale_to_int32(s)
+        else:
+            w = w.reshape(w.shape[-1], -1)
+            s = s.float().reshape(s.shape[-1], -1)
+            weights[weight_key] = w
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
 

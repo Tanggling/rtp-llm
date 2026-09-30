@@ -4,6 +4,9 @@ import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -25,7 +28,11 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
     assert s is not None, "expected non-null FP8 scale"
     if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
+        if is_deep_gemm_e8m0_used():
+            s = _repack_v4_fp8_scale_to_int32(s)
+        else:
+            w = w.reshape(w.shape[-1], -1)
+            s = s.float().reshape(s.shape[-1], -1)
     local = {"_w": w, "_s": s}
     return LinearFactory.create_linear_from_weights(
         local,
@@ -40,7 +47,12 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     w = weights[weight_key]
     s = weights[scale_key]
     if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
+        if is_deep_gemm_e8m0_used():
+            s = _repack_v4_fp8_scale_to_int32(s)
+        else:
+            w = w.reshape(w.shape[-1], -1)
+            s = s.float().reshape(s.shape[-1], -1)
+            weights[weight_key] = w
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
 
