@@ -11,7 +11,7 @@ import platform
 import threading
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 
@@ -36,11 +36,13 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
-    MoEConfigAdapter,
-)
 from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.ops import SpeculativeType
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
 
 __all__ = [
     "DeepepWrapperConfig",
@@ -103,7 +105,7 @@ class DeepepWrapperConfig:
 
     @classmethod
     def from_config_adapter(
-        cls, config_adapter: MoEConfigAdapter, ll_num_max_token_per_rank: int = 0
+        cls, config_adapter: "MoEConfigAdapter", ll_num_max_token_per_rank: int = 0
     ) -> "DeepepWrapperConfig":
         """Create DeepepWrapperConfig from MoEConfigAdapter.
 
@@ -639,6 +641,10 @@ def init_deepep_wrapper(
         engine_config.hw_kernel_config.enable_cuda_graph
         if engine_config.hw_kernel_config is not None
         else False
+    )
+
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
     )
 
     deepep_config_adapter = MoEConfigAdapter(
