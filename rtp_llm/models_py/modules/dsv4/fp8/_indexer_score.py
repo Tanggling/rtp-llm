@@ -49,12 +49,28 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 try:
     import deep_gemm as _deep_gemm
 
-    _HAS_DEEP_GEMM = hasattr(_deep_gemm, "fp8_paged_mqa_logits") and hasattr(
+    _paged_mqa_logits = getattr(_deep_gemm, "fp8_paged_mqa_logits", None)
+    _paged_mqa_uses_tuple_q = False
+    if _paged_mqa_logits is None:
+        _paged_mqa_logits = getattr(
+            _deep_gemm, "fp8_fp4_paged_mqa_logits", None
+        )
+        _paged_mqa_uses_tuple_q = _paged_mqa_logits is not None
+    _mqa_logits = getattr(_deep_gemm, "fp8_mqa_logits", None)
+    _mqa_uses_tuple_q = False
+    if _mqa_logits is None:
+        _mqa_logits = getattr(_deep_gemm, "fp8_fp4_mqa_logits", None)
+        _mqa_uses_tuple_q = _mqa_logits is not None
+    _HAS_DEEP_GEMM = _paged_mqa_logits is not None and hasattr(
         _deep_gemm, "get_paged_mqa_logits_metadata"
     )
-    _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
+    _HAS_DEEP_GEMM_MQA = _mqa_logits is not None
 except ImportError:
     _deep_gemm = None
+    _paged_mqa_logits = None
+    _paged_mqa_uses_tuple_q = False
+    _mqa_logits = None
+    _mqa_uses_tuple_q = False
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
 
@@ -117,8 +133,9 @@ def fp8_paged_indexer_score(
     schedule = _deep_gemm.get_paged_mqa_logits_metadata(
         context_lens, block_size, num_sms
     )
-    return _deep_gemm.fp8_paged_mqa_logits(
-        q_fp8.contiguous(),
+    q_arg = (q_fp8.contiguous(), None) if _paged_mqa_uses_tuple_q else q_fp8.contiguous()
+    return _paged_mqa_logits(
+        q_arg,
         kv_4d,
         w_fold.contiguous(),
         context_lens,
@@ -180,8 +197,18 @@ def fp8_mqa_indexer_score(
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
 
-    return _deep_gemm.fp8_mqa_logits(
-        q_fp8.contiguous(),
+    q_arg = (q_fp8.contiguous(), None) if _mqa_uses_tuple_q else q_fp8.contiguous()
+    if _mqa_uses_tuple_q:
+        return _mqa_logits(
+            q_arg,
+            (k_quant.contiguous(), k_scale.contiguous()),
+            w_fold.contiguous(),
+            cu_seqlen_ks.contiguous(),
+            cu_seqlen_ke.contiguous(),
+            max_seqlen_k or int(k_quant.shape[0]),
+        )
+    return _mqa_logits(
+        q_arg,
         (k_quant.contiguous(), k_scale.contiguous()),
         w_fold.contiguous(),
         cu_seqlen_ks.contiguous(),

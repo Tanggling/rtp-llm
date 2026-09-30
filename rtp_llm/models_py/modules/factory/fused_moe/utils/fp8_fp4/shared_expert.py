@@ -407,7 +407,46 @@ class FusedSharedExpertFastPath:
         if T == 0:
             return out
 
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            fp8_gemm_nt,
+            is_deep_gemm_e8m0_used,
+        )
+
+        if not is_deep_gemm_e8m0_used():
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                sgl_per_token_group_quant_fp8,
+            )
+
+            x_fp8, x_scale = sgl_per_token_group_quant_fp8(
+                x.contiguous(),
+                group_size=128,
+                eps=1.0e-4,
+            )
+            fp8_gemm_nt(
+                (x_fp8, x_scale),
+                w13_parts,
+                gate_up,
+                disable_ue8m0_cast=True,
+            )
+            gate, up = gate_up.float().chunk(2, dim=-1)
+            hidden = require_silu_mul_split()(
+                gate.contiguous(),
+                up.contiguous(),
+                clamp_limit=self.swiglu_limit,
+            )
+            hidden_fp8, hidden_scale = sgl_per_token_group_quant_fp8(
+                hidden.contiguous(),
+                group_size=128,
+                eps=1.0e-4,
+            )
+            fp8_gemm_nt(
+                (hidden_fp8, hidden_scale),
+                w2_parts,
+                out,
+                disable_ue8m0_cast=True,
+            )
+            return out
+
         from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
             quant_bf16_fp8_packed_ue8m0,
         )

@@ -203,6 +203,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         self.dim = int(dim)
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.n_shared_experts = int(n_shared_experts)
+        self._ep_size = int(ep_size)
         self._logical_expert_num = int(n_routed_experts)
         self._physical_expert_num = int(
             n_routed_experts if physical_expert_num is None else physical_expert_num
@@ -348,7 +349,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                                 topk_ids,
                                 self.log2phy,
                                 self.logic_expert_cnt,
-                                runtime_config.ep_size,
+                                self._ep_size,
                                 self._physical_expert_num,
                                 policy=self._dispatch_policy,
                                 dispatcher=self._wf_dispatcher,
@@ -358,7 +359,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                                 topk_ids,
                                 self.log2phy,
                                 self.logic_expert_cnt,
-                                runtime_config.ep_size,
+                                self._ep_size,
                                 self._physical_expert_num,
                             )
                         else:

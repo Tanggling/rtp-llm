@@ -41,6 +41,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import bf16_gemm_nt
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -53,12 +54,17 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     assert weight.dtype == torch.bfloat16, f"expected BF16 weight, got {weight.dtype}"
     assert x.is_contiguous(), "expected contiguous input"
     assert weight.is_contiguous(), "expected contiguous weight"
-    assert (
-        _CUBLAS_GEMM_BF16_BF16_FP32 is not None
-    ), "cublas_gemm_bf16_bf16_fp32 op is not built"
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    if _CUBLAS_GEMM_BF16_BF16_FP32 is not None:
+        out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    else:
+        out_2d = torch.empty(
+            (x_2d.shape[0], weight.shape[0]),
+            dtype=torch.float32,
+            device=x.device,
+        )
+        bf16_gemm_nt(x_2d, weight, out_2d)
     return out_2d.reshape(*leading_shape, weight.shape[0])
 
 

@@ -4,7 +4,10 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    fp8_gemm_nt,
+    is_deep_gemm_e8m0_used,
+)
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     _transform_scale_ue8m0,
     quant_weight_ue8m0,
@@ -22,8 +25,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import FusedM
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.fp8_fp4_base import normalize_moe_w13_gate_up
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+    DeepGemmHybridExecutor,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import DeepepNormalRouterBase
 from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import silu_mul_fp8_quant_packed
+from rtp_llm.models_py.triton_kernels.moe.silu_mul_split import silu_mul_split
 from rtp_llm.utils.model_weight import W
 
 
@@ -38,13 +45,14 @@ class Dsv4DeepepNormalRouter(DeepepNormalRouterBase):
         checker.check(config.moe_quant_method == "FP8_FP4")
 
     def _do_quant_fp8_per_block(self, a1: torch.Tensor):
+        use_e8m0 = is_deep_gemm_e8m0_used()
         return sgl_per_token_group_quant_fp8(
             a1,
             group_size=128,
             eps=1.0e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=True,
+            column_major_scales=use_e8m0,
+            scale_tma_aligned=use_e8m0,
+            scale_ue8m0=use_e8m0,
         )
 
 
@@ -88,6 +96,12 @@ class Dsv4HopperFp8Fp4Executor(FusedMoeExpertExecutor):
             )
         self.w13, self.s13 = self._requant_fp4_stack(w13, s13)
         self.w2, self.s2 = self._requant_fp4_stack(w2, s2)
+        fp8_weights = dict(weights)
+        fp8_weights[W.moe_w1] = self.w13
+        fp8_weights[W.moe_s1] = self.s13
+        fp8_weights[W.moe_w2] = self.w2
+        fp8_weights[W.moe_s2] = self.s2
+        self._delegate = DeepGemmHybridExecutor(config, quant_config, fp8_weights)
 
     @staticmethod
     def _requant_fp4_stack(weight: torch.Tensor, scale: torch.Tensor):
@@ -99,7 +113,11 @@ class Dsv4HopperFp8Fp4Executor(FusedMoeExpertExecutor):
             ).to(torch.bfloat16)
             weight_fp8, scale_raw = quant_weight_ue8m0(dequant, [128, 128])
             fp8_weights.append(weight_fp8)
-            fp8_scales.append(_transform_scale_ue8m0(scale_raw, weight_fp8.size(0)))
+            fp8_scales.append(
+                _transform_scale_ue8m0(scale_raw, weight_fp8.size(0))
+                if is_deep_gemm_e8m0_used()
+                else scale_raw
+            )
         return torch.stack(fp8_weights), torch.stack(fp8_scales)
 
     def execute(
@@ -111,55 +129,14 @@ class Dsv4HopperFp8Fp4Executor(FusedMoeExpertExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
-        if expert_map is not None or a2_scale is not None:
-            raise ValueError("DSV4 FP8/FP4 executor does not accept expert_map/a2_scale")
-        if apply_router_weight_on_input:
-            raise ValueError("DeepEP combine owns DSV4 router-weight application")
-        if payload.expert_x_scale is None or payload.expert_tokens_meta is None:
-            raise ValueError("DSV4 DeepEP payload is missing FP8 scales/token metadata")
-        counts = payload.expert_tokens_meta.expert_num_tokens_cpu
-        if counts is None:
-            counts = payload.expert_tokens_meta.expert_num_tokens.cpu().tolist()
-        elif isinstance(counts, torch.Tensor):
-            counts = counts.cpu().tolist()
-
-        xq = payload.expert_x
-        xs = payload.expert_x_scale
-        output = torch.empty(
-            (xq.size(0), self.w2.size(1)),
-            dtype=torch.bfloat16,
-            device=xq.device,
+        return self._delegate.execute(
+            payload,
+            activation,
+            expert_map,
+            a2_scale,
+            apply_router_weight_on_input,
+            extra_expert_args,
         )
-        offset = 0
-        for expert_id, count in enumerate(counts):
-            count = int(count)
-            if count == 0:
-                continue
-            end = offset + count
-            gate_up = torch.empty(
-                (count, 2 * self.inter_dim),
-                dtype=torch.bfloat16,
-                device=xq.device,
-            )
-            fp8_gemm_nt(
-                (xq[offset:end].contiguous(), xs[offset:end].contiguous()),
-                (self.w13[expert_id], self.s13[expert_id]),
-                gate_up,
-                disable_ue8m0_cast=False,
-            )
-            hq, hs = silu_mul_fp8_quant_packed(
-                gate_up, clamp_limit=self.swiglu_limit, group_size=128
-            )
-            fp8_gemm_nt(
-                (hq, hs),
-                (self.w2[expert_id], self.s2[expert_id]),
-                output[offset:end],
-                disable_ue8m0_cast=False,
-            )
-            offset = end
-        if offset != xq.size(0):
-            raise RuntimeError(f"DSV4 expert token counts cover {offset}/{xq.size(0)} rows")
-        return CombineForwardPayload(fused_expert_output=output)
 
 
 class CudaDsv4DeepepFp8Fp4Strategy(MoeStrategy):

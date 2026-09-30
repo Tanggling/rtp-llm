@@ -5,6 +5,14 @@ import sys
 import time
 import traceback
 
+_RUNTIME_PROBE_ENV = {
+    key: value
+    for key, value in os.environ.items()
+    if key.startswith("PHASE_TIMER")
+    or key.startswith("EXPERT_STATS_PROBE")
+    or key == "DEEPEP_TRAFFIC_STATS"
+}
+
 import requests
 import torch
 
@@ -69,7 +77,7 @@ def start_backend_server_impl(
 
     backend_process = torch.multiprocessing.Process(
         target=start_backend_server,
-        args=(global_controller, py_env_configs, pipe_writer),
+        args=(global_controller, py_env_configs, pipe_writer, _RUNTIME_PROBE_ENV),
         name="backend_manager",
     )
     backend_process.start()

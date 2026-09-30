@@ -30,6 +30,7 @@ from rtp_llm.utils.model_weight import (
     WeightStyle,
     choose_available,
     identity,
+    ones,
     tolerate_failed,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -404,21 +405,15 @@ class ModelDeployWeightInfo:
         self, origin_weight_info: ModelWeightInfo
     ):
         for weights in origin_weight_info.layer_weights:
-            attn_q_weight_info: Optional[CkptWeightInfo] = None
-            for weight in weights:
-                if (
-                    isinstance(weight, AtomicWeight)
-                    or isinstance(weight, AttnAtomicWeight)
-                ) and weight.name == W.attn_qkv_w:
-                    attn_q_weight_info = weight.weights[0]
-                    break
-
-            assert attn_q_weight_info is not None
+            # Hybrid and DSV4 layers do not use the conventional attention
+            # output projection and therefore never consume this scale.
+            if not any(weight.name == W.attn_o_w for weight in weights):
+                continue
             weights.append(
                 AtomicWeight(
                     W.attention_output_static_quant_reciprocal,
-                    [attn_q_weight_info],
-                    create_scalar_ones,
+                    [],
+                    ones,
                     torch.float32,
                 )
             )

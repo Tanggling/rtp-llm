@@ -417,7 +417,10 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    runtime_probe_env: Optional[dict[str, str]] = None,
 ):
+    if runtime_probe_env:
+        os.environ.update(runtime_probe_env)
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)

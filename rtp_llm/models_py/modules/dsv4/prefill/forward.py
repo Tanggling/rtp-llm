@@ -382,9 +382,10 @@ def forward_layers(
             and int(getattr(v4, "_cp_size", 1)) > 1
             and int(v4._prefill_ws_full_rows) > 0
         )
+        q_rows = v4._prefill_ws_q_rows if reserve_cp else int(input_ids.size(0))
         ws = PrefillWorkspace(
             input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
+            q_rows=q_rows,
             q_dim=v4._prefill_ws_q_dim,
             reserve_cp=reserve_cp,
             cp_rows=v4._prefill_ws_full_rows,

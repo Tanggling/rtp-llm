@@ -130,7 +130,11 @@ class CudaFp8GEMMLinear(LinearBase):
             return True
         return False
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if out is not None:
+            return self._deepgemm_linear(input, out=out)
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)

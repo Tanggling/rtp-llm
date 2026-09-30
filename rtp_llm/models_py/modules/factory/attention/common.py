@@ -44,6 +44,7 @@ def reshape_paged_kv_cache(
 
 def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
+    kv_cache: Any = None,
 ) -> Optional[WriteCacheStoreOp]:
     """Create write cache store implementation if needed.
 
