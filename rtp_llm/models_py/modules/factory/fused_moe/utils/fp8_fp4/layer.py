@@ -144,9 +144,14 @@ class Fp8Fp4MoeRuntimeConfig:
         )
         self.moe_config = SimpleNamespace(
             moe_strategy=self.moe_strategy,
+            use_deepep_moe=self.ep_size > 1,
             use_deepep_low_latency=False,
             use_deepep_internode=False,
+            use_all_gather=False,
+            use_mori_ep=False,
             deep_ep_num_sm=0,
+            ll_num_max_token=64,
+            masked_max_token_num=256,
         )
         self.use_deepep_moe = self.ep_size > 1
 
