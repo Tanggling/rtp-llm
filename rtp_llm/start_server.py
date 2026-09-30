@@ -39,6 +39,17 @@ def check_server_health(server_port):
         return False
 
 
+def check_frontend_health(server_port):
+    """Check only that the frontend HTTP server is accepting requests."""
+    try:
+        response = requests.get(
+            f"http://localhost:{server_port}/frontend_health", timeout=60
+        )
+        return response.status_code == 200
+    except BaseException:
+        return False
+
+
 @timer_wrapper(description="start backend server")
 def start_backend_server_impl(
     global_controller,
@@ -312,7 +323,7 @@ def start_frontend_server_impl(
     if process_manager and frontend_processes:
 
         def check_frontend_ready():
-            return check_server_health(py_env_configs.server_config.start_port)
+            return check_frontend_health(py_env_configs.server_config.start_port)
 
         process_manager.register_health_check(
             processes=frontend_processes,
