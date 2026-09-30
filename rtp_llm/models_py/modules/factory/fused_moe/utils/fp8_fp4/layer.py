@@ -116,6 +116,9 @@ class Fp8Fp4MoeRuntimeConfig:
         self.moe_strategy = str(moe_strategy or "auto")
         self.world_size = int(ep_size if world_size is None else world_size)
         self.world_rank = int(ep_rank if world_rank is None else world_rank)
+        self.use_deepep_moe = self.ep_size > 1
+        self.ll_num_max_token = 64
+        self.masked_max_token_num = 256
 
         self.tp_size = 1
         self.tp_rank = 0
@@ -139,7 +142,13 @@ class Fp8Fp4MoeRuntimeConfig:
             ep_rank=self.ep_rank,
             local_rank=self.local_rank,
             world_size=self.world_size,
-            ffn_disaggregate_config=None,
+            ffn_disaggregate_config=SimpleNamespace(
+                enable_ffn_disaggregate=False,
+                attention_tp_size=1,
+                attention_dp_size=1,
+                ffn_tp_size=1,
+                ffn_dp_size=1,
+            ),
             prefill_cp_config=PrefillCPConfig(),
         )
         self.moe_config = SimpleNamespace(
@@ -153,7 +162,6 @@ class Fp8Fp4MoeRuntimeConfig:
             ll_num_max_token=64,
             masked_max_token_num=256,
         )
-        self.use_deepep_moe = self.ep_size > 1
 
 
 class Fp8Fp4MoeLayer(nn.Module):
