@@ -69,8 +69,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self.num_dispatchers = config.world_size // config.tp_size
         self.rank_expert_offset = self.ep_rank * self.expert_num_per_rank
         self.top_k = config.moe_topk_group
-        deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
-        self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
+        if getattr(config, "reuse_initialized_deepep", False):
+            self.deepep_buffer_wrapper = DeepEPWrapper.get_initialized_instance()
+        else:
+            deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
+            self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
         assert (
             self.deepep_buffer_wrapper.mode == DeepEPMode.NORMAL
         ), "DeepEP mode should be NORMAL"

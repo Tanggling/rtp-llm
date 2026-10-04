@@ -117,6 +117,10 @@ class Fp8Fp4MoeRuntimeConfig:
         self.world_size = int(ep_size if world_size is None else world_size)
         self.world_rank = int(ep_rank if world_rank is None else world_rank)
         self.use_deepep_moe = self.ep_size > 1
+        # The backend initializes DeepEP once from the complete EngineConfig.
+        # This lightweight per-layer config does not carry enough launcher
+        # topology to reproduce that config on multi-node deployments.
+        self.reuse_initialized_deepep = True
         self.ll_num_max_token = 64
         self.masked_max_token_num = 256
 

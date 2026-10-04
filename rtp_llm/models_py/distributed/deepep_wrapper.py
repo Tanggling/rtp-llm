@@ -318,6 +318,21 @@ class DeepEPWrapper:
                 )
             return cls._instance
 
+    @classmethod
+    def get_initialized_instance(cls) -> "DeepEPWrapper":
+        """Return the authoritative backend-initialized wrapper.
+
+        Some model-local runtime configs are synthetic views that intentionally
+        omit launcher topology details. Those callers must reuse the instance
+        initialized from EngineConfig instead of constructing a second config.
+        """
+        with cls._lock:
+            if not cls._initialized or cls._instance is None:
+                raise RuntimeError(
+                    "DeepEPWrapper is not initialized. Call init_deepep_wrapper first."
+                )
+            return cls._instance
+
     @staticmethod
     def create(config: DeepepWrapperConfig) -> None:
         """Create a new DeepEPWrapper instance.
