@@ -22,9 +22,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from rtp_llm.models_py.kernels.cuda.quant_layouts import dequantize_fp8_weight
-from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
-    fused_inv_rope_fp8_quant,
-)
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
     apply_rotary_emb_batched,
@@ -56,14 +53,7 @@ def decode_output_proj(
     rd = attn.rope_head_dim
 
     if o.is_cuda and o.numel() > 0:
-        o_fp8, o_scale = fused_inv_rope_fp8_quant(
-            o,
-            freqs_cis,
-            n_groups=attn.n_groups,
-            heads_per_group=attn.n_heads // attn.n_groups,
-            nope_dim=attn.head_dim - attn.rope_head_dim,
-            rope_head_dim=attn.rope_head_dim,
-        )
+        o_fp8, o_scale = attn._quantize_wo_a_input(o, freqs_cis)
         o = attn._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
     else:
         if freqs_cis.dim() == 2 and int(freqs_cis.shape[0]) == bsz:

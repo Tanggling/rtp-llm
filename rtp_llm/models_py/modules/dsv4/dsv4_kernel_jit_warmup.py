@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _DENSE_GEMM_FALLBACK_M_GRID = [
@@ -2401,6 +2402,13 @@ def _create_dummy_batched_fp8_einsum_input(
     a = torch.zeros(
         (m_value, groups, k_value), dtype=torch.float8_e4m3fn, device=device
     )
+    if not is_deep_gemm_e8m0_used():
+        scale = torch.ones(
+            (m_value, groups, _ceil_div(k_value, 128)),
+            dtype=torch.float32,
+            device=device,
+        )
+        return a, scale
     packed_sf_k = _ceil_div(k_value, 512)
     tma_m = _align(m_value, 4)
     scale_group_major = torch.empty(

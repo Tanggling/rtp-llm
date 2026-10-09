@@ -34,6 +34,8 @@ from deep_gemm.utils.layout import (  # noqa: E402
 )
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -77,9 +79,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, Compres
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -368,8 +367,9 @@ def _prepare_wo_a_stacked(
     into the ``fp8_einsum``-expected layout, computed once at init:
 
     - weight: ``[G, R, K]`` fp8 contiguous (free view)
-    - scale : ``[G, R, K/512]`` int32 UE8M0 packed, MN-major TMA-aligned
-      (stride ``(K/512 * tma_R, 1, tma_R)``)
+    - SM100 scale: ``[G, R, K/512]`` int32 UE8M0 packed, MN-major
+      TMA-aligned (stride ``(K/512 * tma_R, 1, tma_R)``)
+    - SM90 scale: ``[G, R, K/128]`` float32 contiguous
 
     Cast e8m0fnu → fp32, row-repeat by 128 along R so
     ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (which operates on
@@ -381,7 +381,10 @@ def _prepare_wo_a_stacked(
     scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
     idx = torch.arange(R, device=scale_raw.device) // 128
     scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
-    s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
+    if is_deep_gemm_e8m0_used():
+        s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
+    else:
+        s_stk = scale_rep
     return w_stk, s_stk
 
 
@@ -2021,6 +2024,60 @@ class AttentionFP8(nn.Module):
             recipe=(1, 1, 128),
         )
         return out.view(B, S, G, R)
+
+    def _quantize_wo_a_input(
+        self,
+        o: torch.Tensor,
+        freqs_cis: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Inverse-RoPE and quantize the grouped ``wo_a`` input.
+
+        SM100 consumes packed UE8M0 scales from the fused Triton kernel.
+        SM90 DeepGEMM requires float32 per-128 scales, so retain the same
+        FP8×FP8 einsum while using its native scale ABI.
+        """
+        if is_deep_gemm_e8m0_used():
+            return fused_inv_rope_fp8_quant(
+                o,
+                freqs_cis,
+                n_groups=self.n_groups,
+                heads_per_group=self.n_heads // self.n_groups,
+                nope_dim=self.head_dim - self.rope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+            )
+
+        flat = o.reshape(-1, self.n_heads, self.head_dim)
+        token_count = int(flat.shape[0])
+        freq_rows = int(freqs_cis.shape[0])
+        if freq_rows != token_count:
+            if o.dim() != 4 or freq_rows != int(o.shape[0]):
+                raise ValueError(
+                    "wo_a inverse-RoPE frequency rows must match tokens or batch: "
+                    f"freq_rows={freq_rows}, tokens={token_count}, shape={tuple(o.shape)}"
+                )
+            freqs_cis = freqs_cis.repeat_interleave(int(o.shape[1]), dim=0)
+
+        rope_dim = self.rope_head_dim
+        rope = torch.view_as_complex(
+            flat[..., -rope_dim:]
+            .float()
+            .reshape(token_count, self.n_heads, rope_dim // 2, 2)
+        )
+        rope = torch.view_as_real(rope * freqs_cis.conj()[:, None, :]).flatten(-2)
+        unrotated = torch.cat((flat[..., :-rope_dim], rope.to(flat.dtype)), dim=-1)
+        grouped = unrotated.reshape(token_count, self.n_groups, -1).contiguous()
+        grouped_2d = grouped.view(token_count * self.n_groups, -1)
+        o_fp8, o_scale = sgl_per_token_group_quant_fp8(
+            grouped_2d,
+            group_size=128,
+            column_major_scales=False,
+            scale_tma_aligned=False,
+            scale_ue8m0=False,
+        )
+        return (
+            o_fp8.view_as(grouped),
+            o_scale.view(token_count, self.n_groups, -1),
+        )
 
     def forward_decode(
         self,
@@ -5721,14 +5778,7 @@ class AttentionFP8(nn.Module):
         o_3d = o.view(-1, self.n_heads, self.head_dim)
         seqlen = o_3d.shape[0]
         with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
-            o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                o_3d,
-                freqs_cis,
-                n_groups=self.n_groups,
-                heads_per_group=self.n_heads // self.n_groups,
-                nope_dim=self.head_dim - self.rope_head_dim,
-                rope_head_dim=self.rope_head_dim,
-            )
+            o_fp8, o_scale = self._quantize_wo_a_input(o_3d, freqs_cis)
         with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
             o_proj = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
         with record_function_range("dsv4.fp8.attn.out.wo_b"):
