@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//home/admin/workspace/aop_lab/app_source/tangling/learn/**)"
-    ]
-  }
-}

@@ -79,9 +79,16 @@ public:
                          const std::vector<int32_t>& other_group_ids,
                          size_t                      per_group_layer_num):
         KVCacheAllocator(config) {
-        (void)full_group_ids;
-        (void)other_group_ids;
-        (void)per_group_layer_num;
+        for (int32_t full_group_id : full_group_ids) {
+            for (int i = 0; i < per_group_layer_num; i++) {
+                fake_layout_.layer_to_group_ids.push_back({full_group_id});
+            }
+        }
+        for (int32_t other_group_id : other_group_ids) {
+            for (int i = 0; i < per_group_layer_num; i++) {
+                fake_layout_.layer_to_group_ids.push_back({other_group_id});
+            }
+        }
     }
     void free(const FreeInfo& free_info) override {
         return;
@@ -99,13 +106,8 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    GroupedCacheLayerLayout allLayerCacheBase() const override {
-        const auto                            topology = config_.topologyPtr();
-        GroupedCacheLayerLayout::GroupLayouts groups;
-        for (const auto& group : topology->groups()) {
-            groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(topology->layers().size())));
-        }
-        return GroupedCacheLayerLayout(topology, std::move(groups));
+    CacheLayerLayout allLayerCacheBase() const override {
+        return fake_layout_;
     }
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
@@ -183,6 +185,9 @@ protected:
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override {
         return {};
     }
+
+private:
+    CacheLayerLayout fake_layout_;
 };
 
 class RemoteConnectorInternalTest: public ::testing::Test {

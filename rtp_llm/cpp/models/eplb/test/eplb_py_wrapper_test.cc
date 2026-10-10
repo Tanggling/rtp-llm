@@ -18,10 +18,6 @@ public:
         eplb_py_wrapper_.loadBalanceWeight(ep_rank, ep_size, eplb_plan_);
     }
 
-    bool isCirculantPreloaded() {
-        return eplb_py_wrapper_.isCirculantPreloaded();
-    }
-
     EplbPlanTensors::tuple_type getResult() {
         return eplb_plan_.to_tuple();
     }
@@ -37,7 +33,6 @@ PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
         .def("init", &EplbPyWrapperOP::init)
         .def("create_balance_plan", &EplbPyWrapperOP::createBalancePlan, py::arg("log_stats"), py::arg("gpu_loads"))
         .def("load_moe_weight", &EplbPyWrapperOP::loadMoeWeight, py::arg("ep_rank"), py::arg("ep_size"))
-        .def("is_circulant_preloaded", &EplbPyWrapperOP::isCirculantPreloaded)
         .def("get_result", &EplbPyWrapperOP::getResult);
 }
 }  // namespace unittest

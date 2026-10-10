@@ -39,20 +39,6 @@ class Log2PhyEndToEndTest(unittest.TestCase):
         layer.gate = FakeGate()
         layer.select_topk = FakeSelectTopk()
         layer.fused_moe = CapturingFusedMoe()
-        layer._phase_timer = SimpleNamespace(
-            moe_block_begin=lambda *args: None,
-            moe_block_end=lambda *args: None,
-            record_moe_checkpoint=lambda *args: None,
-            record_route_split=lambda *args: None,
-        )
-        layer._expert_stats_probe = SimpleNamespace(record=lambda *args: None)
-        layer.layer_idx = 0
-        layer._log2phy_dbg_interval = 0
-        layer._log2phy_dbg_cnt = 0
-        layer._dispatch_policy = "rr"
-        layer._circulant_preloaded = False
-        layer._static_wf_placement = False
-        layer._wf_dispatcher = None
         layer.top_k = 2
         layer.correction_bias = None
         layer.fake_balance_expert = None
